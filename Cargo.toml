@@ -5,3 +5,16 @@ authors = ["Antoine Poinsot <darosior@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
+revault_tx = { git = "https://github.com/darosior/revault_tx", branch = "refactorings", features = ["use-serde"] }
+revault_net = { git = "https://github.com/darosior/revault_net", branch = "update_tx" }
+
+# Don't reinvent the wheel
+dirs = "3.0"
+
+# Used for the config and by revault_net already
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.5"
+
+# Logging stuff, trying to KIS (and minimal)
+log = "0.4"
+fern = "0.6"
