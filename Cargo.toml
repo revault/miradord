@@ -1,0 +1,7 @@
+[package]
+name = "miradord"
+version = "0.0.1"
+authors = ["Antoine Poinsot <darosior@protonmail.com>"]
+edition = "2018"
+
+[dependencies]
