@@ -1,9 +1,13 @@
+mod bitcoind;
 mod config;
 
+use bitcoind::start_bitcoind;
 use config::Config;
 use revault_net::sodiumoxide;
 
 use std::{env, path::PathBuf, process, time};
+
+const VAULT_WATCHONLY_FILENAME: &str = "vault_watchonly";
 
 fn parse_args(args: Vec<String>) -> Option<PathBuf> {
     if args.len() == 1 {
@@ -60,6 +64,16 @@ fn main() {
     });
     setup_logger(config.log_level).unwrap_or_else(|e| {
         eprintln!("Error setting up logger: {}", e);
+        process::exit(1);
+    });
+
+    log::info!("Setting up bitcoind connection");
+    let bitcoind = start_bitcoind(
+        &config.bitcoind_config,
+        VAULT_WATCHONLY_FILENAME.to_string(),
+    )
+    .unwrap_or_else(|e| {
+        log::error!("Error setting up bitcoind RPC connection: '{}'", e);
         process::exit(1);
     });
 }
