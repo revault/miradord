@@ -1,7 +1,7 @@
 mod bitcoind;
 mod config;
 
-use bitcoind::start_bitcoind;
+use bitcoind::{start_bitcoind, wait_bitcoind_synced};
 use config::Config;
 use revault_net::sodiumoxide;
 
@@ -76,4 +76,7 @@ fn main() {
         log::error!("Error setting up bitcoind RPC connection: '{}'", e);
         process::exit(1);
     });
+
+    log::info!("Checking if bitcoind is synced");
+    wait_bitcoind_synced(&bitcoind);
 }

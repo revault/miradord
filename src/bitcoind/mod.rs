@@ -1,6 +1,9 @@
 pub mod interface;
 
-use crate::{bitcoind::interface::BitcoinD, config::BitcoindConfig};
+use crate::{
+    bitcoind::interface::{BitcoinD, SyncInfo},
+    config::BitcoindConfig,
+};
 use revault_tx::bitcoin::Network;
 
 use std::{io, thread, time::Duration};
@@ -101,22 +104,77 @@ pub fn start_bitcoind(
     Ok(bitcoind)
 }
 
+/// Poll 'getblockchaininfo' until bitcoind is synced, by trying to not harass it.
+pub fn wait_bitcoind_synced(bitcoind: &BitcoinD) {
+    loop {
+        let SyncInfo {
+            headers,
+            blocks,
+            ibd,
+            progress,
+        } = bitcoind.synchronization_info();
+
+        // We consider it good enough, as it may take some time to get to 1.0
+        if !ibd && progress > 0.999 {
+            break;
+        }
+
+        if ibd {
+            log::info!(
+                "Bitcoind is currently performing IBD, this may take some time (progress: {})",
+                progress
+            );
+        } else if progress < 0.9 {
+            log::info!(
+                "Bitcoind is far behind network tip, this may take some time (progress: {})",
+                progress
+            );
+        }
+
+        // We don't want to harass bitcoind by locking cs_main while it's doing its best
+        // to get up to date, therefore sleep long enough, but not too much.
+        // Sleeping a second per 20 blocks seems a good upper bound estimation
+        // (~7h for 500_000 blocks), so we divide it by 2 here in order to be
+        // conservative. Eg if 10_000 are left to be downloaded we'll check back
+        // in ~4min.
+        let delta = headers.checked_sub(blocks).unwrap_or(0);
+        #[cfg(test)]
+        let min_duration = Duration::from_secs(1);
+        #[cfg(not(test))]
+        let min_duration = Duration::from_secs(5);
+        let sleep_duration = std::cmp::max(Duration::from_secs(delta / 20 / 2), min_duration);
+
+        log::info!(
+            "Current sync progress: '{}' ({}/{}). We'll poll back in {} seconds.",
+            progress,
+            blocks,
+            headers,
+            sleep_duration.as_secs()
+        );
+        thread::sleep(sleep_duration);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
         io::{BufRead, BufReader, Write},
-        net, path, process, thread, time,
+        net, path, thread, time,
     };
 
-    use super::{super::VAULT_WATCHONLY_FILENAME, start_bitcoind, BitcoindConfig, Network};
+    use super::{
+        super::VAULT_WATCHONLY_FILENAME, start_bitcoind, wait_bitcoind_synced, BitcoindConfig,
+        Network,
+    };
 
     fn client_test<F>(cb: F) -> ()
     where
         F: FnOnce(net::TcpListener, BitcoindConfig) -> (),
     {
         let network = Network::Bitcoin;
-        let cookie: path::PathBuf = format!("scratch_test_{:?}.cookie", thread::current().id()).into();
+        let cookie: path::PathBuf =
+            format!("scratch_test_{:?}.cookie", thread::current().id()).into();
         // Will overwrite should it exist already
         fs::write(&cookie, &[0; 32]).unwrap();
         let addr: net::SocketAddr =
@@ -268,6 +326,50 @@ mod tests {
             stream.flush().unwrap();
 
             // It should have ended cleanly.
+            client_thread.join().unwrap();
+        })
+    }
+
+    #[test]
+    fn bitcoind_sync_status() {
+        client_test(|server, bitcoind_config| {
+            let client_thread = thread::spawn(move || {
+                let bitcoind =
+                    start_bitcoind(&bitcoind_config, VAULT_WATCHONLY_FILENAME.to_string()).unwrap();
+                wait_bitcoind_synced(&bitcoind);
+            });
+
+            complete_sanity_check(&server);
+            complete_network_check(&server);
+
+            // First tell them we aren't synced yet, they will sleep a bit and try again
+            let (mut stream, _) = server.accept().unwrap();
+            read_til_json_end(&mut stream);
+            let resp =
+            "HTTP/1.1 200\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"blocks\":1000,\"headers\":1100,\"verificationprogress\":0.98,\"initialblockdownload\":false}}\n"
+                .as_bytes();
+            stream.write_all(resp).unwrap();
+            stream.flush().unwrap();
+
+            // Almost done!
+            let (mut stream, _) = server.accept().unwrap();
+            read_til_json_end(&mut stream);
+            let resp =
+            "HTTP/1.1 200\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"blocks\":1099,\"headers\":1100,\"verificationprogress\":0.998,\"initialblockdownload\":false}}\n"
+                .as_bytes();
+            stream.write_all(resp).unwrap();
+            stream.flush().unwrap();
+
+            // Now tell them we are synced
+            let (mut stream, _) = server.accept().unwrap();
+            read_til_json_end(&mut stream);
+            let resp =
+            "HTTP/1.1 200\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"blocks\":1,\"headers\":1,\"verificationprogress\":0.9991,\"initialblockdownload\":false}}\n"
+                .as_bytes();
+            stream.write_all(resp).unwrap();
+            stream.flush().unwrap();
+
+            // They should finish cleanly
             client_thread.join().unwrap();
         })
     }

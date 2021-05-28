@@ -246,4 +246,35 @@ impl BitcoinD {
             .expect("No 'chain' in 'getblockchaininfo' response?")
             .to_string()
     }
+
+    /// Fetch info about bitcoind's synchronization status
+    pub fn synchronization_info(&self) -> SyncInfo {
+        let chaininfo = self.make_node_request("getblockchaininfo", &[]);
+        SyncInfo {
+            headers: chaininfo
+                .get("headers")
+                .and_then(|h| h.as_u64())
+                .expect("No valid 'headers' in getblockchaininfo response?"),
+            blocks: chaininfo
+                .get("blocks")
+                .and_then(|b| b.as_u64())
+                .expect("No valid 'blocks' in getblockchaininfo response?"),
+            ibd: chaininfo
+                .get("initialblockdownload")
+                .and_then(|i| i.as_bool())
+                .expect("No valid 'initialblockdownload' in getblockchaininfo response?"),
+            progress: chaininfo
+                .get("verificationprogress")
+                .and_then(|i| i.as_f64())
+                .expect("No valid 'initialblockdownload' in getblockchaininfo response?"),
+        }
+    }
+}
+
+/// Info about bitcoind's sync state
+pub struct SyncInfo {
+    pub headers: u64,
+    pub blocks: u64,
+    pub ibd: bool,
+    pub progress: f64,
 }
