@@ -53,6 +53,10 @@ fn default_poll_interval() -> Duration {
     Duration::from_secs(10)
 }
 
+fn daemon_default() -> bool {
+    false
+}
+
 /// Everything we need to know for talking to bitcoind serenely
 #[derive(Debug, Clone, Deserialize)]
 pub struct BitcoindConfig {
@@ -96,9 +100,11 @@ pub struct Config {
     #[serde(deserialize_with = "deserialize_noisepubkey")]
     pub coordinator_noise_key: NoisePubkey,
     /// An optional custom data directory
+    // TODO: have a default implem as in cosignerd
     pub data_dir: Option<PathBuf>,
     /// Whether to daemonize the process
-    pub daemon: Option<bool>,
+    #[serde(default = "daemon_default")]
+    pub daemon: bool,
     /// What messages to log
     #[serde(
         deserialize_with = "deserialize_loglevel",
@@ -106,6 +112,7 @@ pub struct Config {
     )]
     pub log_level: log::LevelFilter,
     /// <ip:port> to bind to
+    // TODO: have a default implem as in cosignerd
     pub listen: Option<SocketAddr>,
 }
 

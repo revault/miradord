@@ -1,9 +1,11 @@
 mod bitcoind;
 mod config;
+mod daemonize;
 mod keys;
 
 use bitcoind::{load_watchonly_wallet, start_bitcoind, wait_bitcoind_synced};
 use config::{config_folder_path, Config};
+use daemonize::daemonize;
 use keys::read_or_create_noise_key;
 use revault_net::{
     bitcoin::hashes::hex::ToHex,
@@ -15,6 +17,8 @@ use std::{env, fs, os::unix::fs::DirBuilderExt, path, process, time};
 
 const VAULT_WATCHONLY_FILENAME: &str = "vault_watchonly";
 const NOISE_KEY_FILENAME: &str = "noise_secret";
+const PID_FILENAME: &str = "miradord.pid";
+const LOG_FILENAME: &str = "log";
 
 fn parse_args(args: Vec<String>) -> Option<path::PathBuf> {
     if args.len() == 1 {
@@ -142,4 +146,27 @@ fn main() {
             .0
             .to_hex()
     );
+
+    if config.daemon {
+        let mut pid_file = data_dir.clone();
+        pid_file.push(PID_FILENAME);
+
+        let mut log_file = data_dir.clone();
+        log_file.push(LOG_FILENAME);
+
+        log::info!(
+            "Daemonizing with root '{}', pid file '{}' and log file '{}'",
+            data_dir.to_string_lossy(),
+            pid_file.to_string_lossy(),
+            log_file.to_string_lossy()
+        );
+        unsafe {
+            daemonize(&data_dir, &pid_file, &log_file).unwrap_or_else(|e| {
+                eprintln!("Error daemonizing: {}", e);
+                // Duplicated as the error could happen after we fork and set stderr to /dev/null
+                log::error!("Error daemonizing: {}", e);
+                process::exit(1);
+            });
+        }
+    }
 }
