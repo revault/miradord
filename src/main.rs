@@ -1,15 +1,15 @@
 mod bitcoind;
 mod config;
 
-use bitcoind::{start_bitcoind, wait_bitcoind_synced};
-use config::Config;
+use bitcoind::{load_watchonly_wallet, start_bitcoind, wait_bitcoind_synced};
+use config::{config_folder_path, Config};
 use revault_net::sodiumoxide;
 
-use std::{env, path::PathBuf, process, time};
+use std::{env, fs, os::unix::fs::DirBuilderExt, path, process, time};
 
 const VAULT_WATCHONLY_FILENAME: &str = "vault_watchonly";
 
-fn parse_args(args: Vec<String>) -> Option<PathBuf> {
+fn parse_args(args: Vec<String>) -> Option<path::PathBuf> {
     if args.len() == 1 {
         return None;
     }
@@ -20,7 +20,7 @@ fn parse_args(args: Vec<String>) -> Option<PathBuf> {
         process::exit(1);
     }
 
-    Some(PathBuf::from(args[2].to_owned()))
+    Some(path::PathBuf::from(args[2].to_owned()))
 }
 
 // We always log on stdout, it'll be piped if we are daemonized.
@@ -48,7 +48,18 @@ fn setup_logger(log_level: log::LevelFilter) -> Result<(), fern::InitError> {
     Ok(())
 }
 
+fn create_datadir(datadir_path: &path::Path) -> Result<(), std::io::Error> {
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700).recursive(true).create(datadir_path)
+}
+
 fn main() {
+    #[cfg(not(unix))]
+    {
+        eprintln!("Only Linux is supported.");
+        process::exit(1);
+    }
+
     let args = env::args().collect();
     let conf_file = parse_args(args);
 
@@ -67,16 +78,44 @@ fn main() {
         process::exit(1);
     });
 
-    log::info!("Setting up bitcoind connection");
-    let bitcoind = start_bitcoind(
-        &config.bitcoind_config,
-        VAULT_WATCHONLY_FILENAME.to_string(),
-    )
-    .unwrap_or_else(|e| {
-        log::error!("Error setting up bitcoind RPC connection: '{}'", e);
+    let mut data_dir = config.data_dir.unwrap_or_else(|| {
+        config_folder_path().unwrap_or_else(|e| {
+            eprintln!("Error getting default data directory: '{}'.", e);
+            process::exit(1);
+        })
+    });
+    data_dir.push(config.bitcoind_config.network.to_string());
+    log::info!("Using data directory at '{}'.", data_dir.to_string_lossy());
+    if !data_dir.as_path().exists() {
+        log::info!("Data directory doesn't exist, creating it.");
+        create_datadir(&data_dir).unwrap_or_else(|e| {
+            eprintln!("Error creating data directory: '{}'.", e);
+            process::exit(1);
+        });
+    }
+    data_dir = fs::canonicalize(data_dir).unwrap_or_else(|e| {
+        eprintln!("Error canonicalizing data directory: '{}'.", e);
         process::exit(1);
     });
 
+    log::info!("Setting up bitcoind connection");
+    let mut vault_watchonly_path = data_dir
+        .to_str()
+        .expect("Data dir must be valid unicode")
+        .to_string();
+    vault_watchonly_path.push_str(VAULT_WATCHONLY_FILENAME);
+    let bitcoind = start_bitcoind(&config.bitcoind_config, vault_watchonly_path.clone())
+        .unwrap_or_else(|e| {
+            log::error!("Error setting up bitcoind RPC connection: '{}'", e);
+            process::exit(1);
+        });
+
     log::info!("Checking if bitcoind is synced");
     wait_bitcoind_synced(&bitcoind);
+
+    load_watchonly_wallet(&bitcoind, vault_watchonly_path).unwrap_or_else(|e| {
+        log::error!("Error loading vault watchonly wallet: '{}'", e);
+        process::exit(1);
+    });
+    // TODO: load feebumping wallet too.
 }

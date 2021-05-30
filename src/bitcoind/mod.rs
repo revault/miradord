@@ -6,7 +6,7 @@ use crate::{
 };
 use revault_tx::bitcoin::Network;
 
-use std::{io, thread, time::Duration};
+use std::{io, path::PathBuf, thread, time::Duration};
 
 use jsonrpc::{
     error::{Error, RpcError},
@@ -22,6 +22,8 @@ pub enum BitcoindError {
     Server(Error),
     /// Bitcoind isn't on the right network!
     InvalidNetwork(String /* Actual net */, String /* Expected net */),
+    /// Multiple instances of our watchonly wallet are loaded on bitcoind, Bad Thing Will Happen
+    MultiWatchonlyLoaded(usize, String),
 }
 
 impl BitcoindError {
@@ -44,6 +46,11 @@ impl std::fmt::Display for BitcoindError {
                 f,
                 "Bitcoind is running on '{}' but we are configured for '{}'",
                 actual, expected
+            ),
+            BitcoindError::MultiWatchonlyLoaded(n, ref wallet_path) => write!(
+                f,
+                "Bitcoind insane state: {} instances of watchonly wallet '{}' loaded.",
+                n, wallet_path
             ),
         }
     }
@@ -153,6 +160,46 @@ pub fn wait_bitcoind_synced(bitcoind: &BitcoinD) {
         );
         thread::sleep(sleep_duration);
     }
+}
+
+pub fn load_watchonly_wallet(
+    bitcoind: &BitcoinD,
+    wallet_path: String,
+) -> Result<(), BitcoindError> {
+    if !PathBuf::from(wallet_path.clone()).exists() {
+        log::info!("No wallet file at '{}', creating a new one", &wallet_path);
+
+        // Remove any leftover. This can happen if we delete the watchonly wallet but don't restart
+        // bitcoind.
+        while bitcoind.listwallets().contains(&wallet_path) {
+            log::info!("Found a leftover watchonly wallet loaded on bitcoind. Removing it.");
+            if let Err(e) = bitcoind.unloadwallet(wallet_path.clone()) {
+                log::error!("Error unloading wallet '{}': '{}'", &wallet_path, e);
+            }
+        }
+
+        bitcoind.createwallet(wallet_path)?;
+    } else {
+        match bitcoind
+            .listwallets()
+            .into_iter()
+            .filter(|path| path == &wallet_path)
+            .count()
+        {
+            0 => {
+                log::info!("Loading watchonly wallet '{}'.", &wallet_path);
+                bitcoind.loadwallet(wallet_path)?;
+            }
+            1 => {
+                log::info!("Watchonly wallet '{}' already loaded.", wallet_path);
+            }
+            n => {
+                return Err(BitcoindError::MultiWatchonlyLoaded(n, wallet_path));
+            }
+        };
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

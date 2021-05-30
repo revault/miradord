@@ -187,13 +187,21 @@ impl BitcoinD {
         client: &Client,
         method: &'a str,
         params: &'b [Box<serde_json::value::RawValue>],
+        fail_fast: bool,
     ) -> Result<Json, BitcoindError> {
         let req = client.build_request(method, &params);
         log::trace!("Sending to bitcoind: {:#?}", req);
 
-        // Trying to be robust on bitcoind's spurious failures. We try to support bitcoind failing
-        // under our feet for a few dozens of seconds, while not delaying an early failure (for
-        // example, if we got the RPC listening address or path to the cookie wrong).
+        // If we are explicitly told to not try again, don't.
+        if fail_fast {
+            return client
+                .send_request(req.clone())
+                .map_err(BitcoindError::Server)?
+                .result()
+                .map_err(BitcoindError::Server);
+        }
+
+        // Trying to be robust on bitcoind's spurious failures.
         let start = Instant::now();
         loop {
             match client.send_request(req.clone()) {
@@ -219,11 +227,19 @@ impl BitcoinD {
         method: &'a str,
         params: &'b [Box<serde_json::value::RawValue>],
     ) -> Json {
-        self.make_request(&self.node_client, method, params)
+        self.make_request(&self.node_client, method, params, false)
             .unwrap_or_else(|e| {
                 log::error!("Fatal bitcoind RPC error (node client): '{}'", e);
                 process::exit(1);
             })
+    }
+
+    fn make_node_request_failible<'a, 'b>(
+        &self,
+        method: &'a str,
+        params: &'b [Box<serde_json::value::RawValue>],
+    ) -> Result<Json, BitcoindError> {
+        self.make_request(&self.node_client, method, params, true)
     }
 
     fn make_vault_request<'a, 'b>(
@@ -231,7 +247,7 @@ impl BitcoinD {
         method: &'a str,
         params: &'b [Box<serde_json::value::RawValue>],
     ) -> Json {
-        self.make_request(&self.vault_client, method, params)
+        self.make_request(&self.vault_client, method, params, false)
             .unwrap_or_else(|e| {
                 log::error!("Fatal bitcoind RPC error (vault watchonly client): '{}'", e);
                 process::exit(1);
@@ -268,6 +284,72 @@ impl BitcoinD {
                 .and_then(|i| i.as_f64())
                 .expect("No valid 'initialblockdownload' in getblockchaininfo response?"),
         }
+    }
+
+    /// Create a descriptor watchonly wallet
+    pub fn createwallet(&self, wallet_path: String) -> Result<(), BitcoindError> {
+        let res = self.make_node_request_failible(
+            "createwallet",
+            &params!(
+                Json::String(wallet_path),
+                Json::Bool(true),             // watchonly
+                Json::Bool(false),            // blank
+                Json::String("".to_string()), // passphrase,
+                Json::Bool(false),            // avoid_reuse
+                Json::Bool(true),             // descriptors
+                Json::Bool(true),             // load_on_startup
+            ),
+        )?;
+
+        if let Some(w) = res.get("warning") {
+            log::warn!("Warning creating wallet: '{}'", w);
+        }
+
+        Ok(())
+    }
+
+    /// Get a list of the name of loaded wallets on bitcoind
+    pub fn listwallets(&self) -> Vec<String> {
+        self.make_node_request("listwallets", &[])
+            .as_array()
+            .expect("API break, 'listwallets' didn't return an array.")
+            .into_iter()
+            .map(|json_str| {
+                json_str
+                    .as_str()
+                    .expect("API break: 'listwallets' contains a non-string value")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Load a watchonly wallet. Failible since called at startup.
+    pub fn loadwallet(&self, wallet_path: String) -> Result<(), BitcoindError> {
+        let res = self.make_node_request_failible(
+            "loadwallet",
+            &params!(
+                Json::String(wallet_path),
+                Json::Bool(true), // load_on_startup
+            ),
+        )?;
+
+        if let Some(w) = res.get("warning") {
+            log::warn!("Warning loading wallet: '{}'", w);
+        }
+
+        Ok(())
+    }
+
+    /// Unload a watchonly wallet.
+    pub fn unloadwallet(&self, wallet_path: String) -> Result<(), BitcoindError> {
+        let res =
+            self.make_node_request_failible("unloadwallet", &params!(Json::String(wallet_path),))?;
+
+        if let Some(w) = res.get("warning") {
+            log::warn!("Warning unloading wallet: '{}'", w);
+        }
+
+        Ok(())
     }
 }
 
