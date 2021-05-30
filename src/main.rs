@@ -1,13 +1,20 @@
 mod bitcoind;
 mod config;
+mod keys;
 
 use bitcoind::{load_watchonly_wallet, start_bitcoind, wait_bitcoind_synced};
 use config::{config_folder_path, Config};
-use revault_net::sodiumoxide;
+use keys::read_or_create_noise_key;
+use revault_net::{
+    bitcoin::hashes::hex::ToHex,
+    noise::PublicKey as NoisePubKey,
+    sodiumoxide::{self, crypto::scalarmult::curve25519},
+};
 
 use std::{env, fs, os::unix::fs::DirBuilderExt, path, process, time};
 
 const VAULT_WATCHONLY_FILENAME: &str = "vault_watchonly";
+const NOISE_KEY_FILENAME: &str = "noise_secret";
 
 fn parse_args(args: Vec<String>) -> Option<path::PathBuf> {
     if args.len() == 1 {
@@ -118,4 +125,21 @@ fn main() {
         process::exit(1);
     });
     // TODO: load feebumping wallet too.
+
+    let mut noise_secret_path = data_dir.clone();
+    noise_secret_path.push(path::Path::new(NOISE_KEY_FILENAME));
+    log::info!(
+        "Reading or generating Noise key at '{:?}'",
+        noise_secret_path
+    );
+    let noise_secret = read_or_create_noise_key(&noise_secret_path).unwrap_or_else(|e| {
+        log::error!("Error reading or generating Noise key: '{}'", e);
+        process::exit(1);
+    });
+    log::info!(
+        "Using Noise key '{}'.",
+        NoisePubKey(curve25519::scalarmult_base(&curve25519::Scalar(noise_secret.0)).0)
+            .0
+            .to_hex()
+    );
 }
