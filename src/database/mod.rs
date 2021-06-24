@@ -100,7 +100,8 @@ fn db_version(db_path: &path::Path) -> Result<u32, DatabaseError> {
     Ok(rows.pop().expect("No row in version table?"))
 }
 
-fn db_instance(db_path: &path::Path) -> Result<DbInstance, DatabaseError> {
+/// Get the "metadata" entry from the DB
+pub fn db_instance(db_path: &path::Path) -> Result<DbInstance, DatabaseError> {
     let mut rows: Vec<DbInstance> =
         db_query(db_path, "SELECT * FROM instances", [], |row| row.try_into())?;
 
@@ -213,6 +214,7 @@ fn check_db(
     Ok(())
 }
 
+/// Create the database if it doesn't exist already, then sanity check it.
 pub fn setup_db(
     db_path: &path::Path,
     deposit_descriptor: &DepositDescriptor,
@@ -302,7 +304,9 @@ mod tests {
             &cpfp_desc,
             Network::Signet,
         )
-        .unwrap_err().to_string().contains("Invalid network"));
+        .unwrap_err()
+        .to_string()
+        .contains("Invalid network"));
 
         // If any of the descriptor changed since DB creation, it'll fail.
         assert!(setup_db(
@@ -312,7 +316,9 @@ mod tests {
             &cpfp_desc,
             Network::Bitcoin,
         )
-        .unwrap_err().to_string().contains("Descriptor mismatch"));
+        .unwrap_err()
+        .to_string()
+        .contains("Descriptor mismatch"));
         assert!(setup_db(
             &db_path,
             &deposit_desc,
@@ -320,7 +326,9 @@ mod tests {
             &cpfp_desc,
             Network::Bitcoin,
         )
-        .unwrap_err().to_string().contains("Descriptor mismatch"));
+        .unwrap_err()
+        .to_string()
+        .contains("Descriptor mismatch"));
         assert!(setup_db(
             &db_path,
             &deposit_desc,
@@ -328,7 +336,9 @@ mod tests {
             &sec_cpfp_desc,
             Network::Bitcoin,
         )
-        .unwrap_err().to_string().contains("Descriptor mismatch"));
+        .unwrap_err()
+        .to_string()
+        .contains("Descriptor mismatch"));
 
         // It will have stored the current DB version and will refuse to open a DB from
         // the future
@@ -346,7 +356,9 @@ mod tests {
             &cpfp_desc,
             Network::Bitcoin,
         )
-        .unwrap_err().to_string().contains("Invalid database version"));
+        .unwrap_err()
+        .to_string()
+        .contains("Invalid database version"));
 
         // Cleanup
         fs::remove_file(&db_path).unwrap();

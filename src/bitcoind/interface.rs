@@ -1,8 +1,11 @@
 use crate::{bitcoind::BitcoindError, config::BitcoindConfig};
+use revault_tx::bitcoin::BlockHash;
 
 use std::{
     any::Any,
-    fs, process, thread,
+    fs, process,
+    str::FromStr,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -282,7 +285,7 @@ impl BitcoinD {
             progress: chaininfo
                 .get("verificationprogress")
                 .and_then(|i| i.as_f64())
-                .expect("No valid 'initialblockdownload' in getblockchaininfo response?"),
+                .expect("No valid 'verificationprogress' in getblockchaininfo response?"),
         }
     }
 
@@ -351,6 +354,35 @@ impl BitcoinD {
 
         Ok(())
     }
+
+    /// Get the (height, hash) pair of the current best block
+    pub fn chain_tip(&self) -> ChainTip {
+        let chaininfo = self.make_node_request("getblockchaininfo", &[]);
+        ChainTip {
+            height: chaininfo
+                .get("blocks")
+                .and_then(|b| b.as_i64())
+                .expect("No valid 'blocks' in getblockchaininfo response?")
+                as i32,
+            hash: BlockHash::from_str(
+                chaininfo
+                    .get("bestblockhash")
+                    .and_then(|i| i.as_str())
+                    .expect("No valid 'bestblockhash' in getblockchaininfo response?"),
+            )
+            .expect("Not a valid block hash in 'bestblockhash' field?"),
+        }
+    }
+
+    /// Get the hash of the block at this height
+    pub fn block_hash(&self, height: i32) -> BlockHash {
+        BlockHash::from_str(
+            self.make_node_request("getblockhash", &params!(height))
+                .as_str()
+                .expect("'getblockhash' didn't return a string."),
+        )
+        .expect("'getblockhash' returned an invalid block hash")
+    }
 }
 
 /// Info about bitcoind's sync state
@@ -359,4 +391,10 @@ pub struct SyncInfo {
     pub blocks: u64,
     pub ibd: bool,
     pub progress: f64,
+}
+
+/// Block height and block hash of what we consider to be the block chain tip
+pub struct ChainTip {
+    pub height: i32,
+    pub hash: BlockHash,
 }
