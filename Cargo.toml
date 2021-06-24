@@ -28,3 +28,7 @@ libc = "0.2"
 
 # For the database
 rusqlite = { version = "0.25.3", features = ["bundled", "unlock_notify"] }
+
+# We want to have a backtrace on panic, and the stdlib doesn't have a programmatic
+# interface yet to work with our custom panic hook.
+backtrace = "0.3.60"

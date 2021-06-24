@@ -15,7 +15,7 @@ use revault_net::{
     sodiumoxide::{self, crypto::scalarmult::curve25519},
 };
 
-use std::{env, fs, os::unix::fs::DirBuilderExt, path, process, time};
+use std::{env, fs, os::unix::fs::DirBuilderExt, path, process, time, panic};
 
 const DATABASE_FILENAME: &str = "mirarod.sqlite3";
 const VAULT_WATCHONLY_FILENAME: &str = "vault_watchonly";
@@ -62,6 +62,29 @@ fn setup_logger(log_level: log::LevelFilter) -> Result<(), fern::InitError> {
     Ok(())
 }
 
+// A panic in any thread should stop the main thread, and print the panic with a backtrace.
+fn setup_panic_hook() {
+    panic::set_hook(Box::new(move |panic_info| {
+        let file = panic_info
+            .location()
+            .map(|l| l.file())
+            .unwrap_or("'unknown'");
+        let line = panic_info
+            .location()
+            .map(|l| l.line().to_string())
+            .unwrap_or_else(|| "'unknown'".to_string());
+
+        let bt = backtrace::Backtrace::new();
+        if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            log::error!("panic occurred at line {} of file {}: {:?}\n{:?}", line, file, s, bt);
+        } else {
+            log::error!("panic occurred at line {} of file {}\n{:?}", line, file, bt);
+        }
+
+        process::exit(1);
+    }));
+}
+
 fn create_datadir(datadir_path: &path::Path) -> Result<(), std::io::Error> {
     let mut builder = fs::DirBuilder::new();
     builder.mode(0o700).recursive(true).create(datadir_path)
@@ -70,9 +93,10 @@ fn create_datadir(datadir_path: &path::Path) -> Result<(), std::io::Error> {
 fn main() {
     #[cfg(not(unix))]
     {
-        eprintln!("Only Linux is supported.");
+        eprintln!("Only Unix is supported.");
         process::exit(1);
     }
+    setup_panic_hook();
 
     let args = env::args().collect();
     let conf_file = parse_args(args);
