@@ -1,11 +1,13 @@
 mod bitcoind;
 mod config;
 mod daemonize;
+mod database;
 mod keys;
 
 use bitcoind::{load_watchonly_wallet, start_bitcoind, wait_bitcoind_synced};
 use config::{config_folder_path, Config};
 use daemonize::daemonize;
+use database::setup_db;
 use keys::read_or_create_noise_key;
 use revault_net::{
     bitcoin::hashes::hex::ToHex,
@@ -15,6 +17,7 @@ use revault_net::{
 
 use std::{env, fs, os::unix::fs::DirBuilderExt, path, process, time};
 
+const DATABASE_FILENAME: &str = "mirarod.sqlite3";
 const VAULT_WATCHONLY_FILENAME: &str = "vault_watchonly";
 const NOISE_KEY_FILENAME: &str = "noise_secret";
 const PID_FILENAME: &str = "miradord.pid";
@@ -106,6 +109,21 @@ fn main() {
     }
     data_dir = fs::canonicalize(data_dir).unwrap_or_else(|e| {
         eprintln!("Error canonicalizing data directory: '{}'.", e);
+        process::exit(1);
+    });
+
+    log::info!("Setting up the database");
+    let mut db_path = data_dir.clone();
+    db_path.push(path::Path::new(DATABASE_FILENAME));
+    setup_db(
+        &db_path,
+        &config.scripts_config.deposit_descriptor,
+        &config.scripts_config.unvault_descriptor,
+        &config.scripts_config.cpfp_descriptor,
+        config.bitcoind_config.network,
+    )
+    .unwrap_or_else(|e| {
+        log::error!("Error setting up database: '{}'", e);
         process::exit(1);
     });
 
