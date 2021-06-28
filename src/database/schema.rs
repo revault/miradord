@@ -58,6 +58,7 @@ CREATE TABLE signatures (
     id INTEGER PRIMARY KEY NOT NULL,
     vault_id INTEGER NOT NULL,
     tx_type INTEGER NOT NULL CHECK (tx_type IN (0,1,2)),
+    pubkey BLOB NOT NULL,
     signature BLOB UNIQUE NOT NULL,
     FOREIGN KEY (vault_id) REFERENCES vaults (id)
         ON UPDATE RESTRICT
@@ -194,6 +195,7 @@ pub struct DbSignature {
     pub id: i64,
     pub vault_id: i64,
     pub tx_type: SigTxType,
+    pub pubkey: secp256k1::PublicKey,
     pub signature: secp256k1::Signature,
 }
 
@@ -209,7 +211,11 @@ impl TryFrom<&rusqlite::Row<'_>> for DbSignature {
             .try_into()
             .expect("Insane db: tx_type out of bounds");
 
-        let signature: Vec<u8> = row.get(3)?;
+        let pubkey: Vec<u8> = row.get(3)?;
+        let pubkey = secp256k1::PublicKey::from_slice(&pubkey)
+            .expect("Insane db: invalid pubkey in sig table");
+
+        let signature: Vec<u8> = row.get(4)?;
         let signature =
             secp256k1::Signature::from_der(&signature).expect("Insane db: non-DER signature");
 
@@ -217,6 +223,7 @@ impl TryFrom<&rusqlite::Row<'_>> for DbSignature {
             id,
             vault_id,
             tx_type,
+            pubkey,
             signature,
         })
     }
