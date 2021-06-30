@@ -1,5 +1,5 @@
 use crate::{bitcoind::BitcoindError, config::BitcoindConfig};
-use revault_tx::bitcoin::BlockHash;
+use revault_tx::bitcoin::{BlockHash, OutPoint, Transaction as BitcoinTransaction, consensus::encode};
 
 use std::{
     any::Any,
@@ -383,6 +383,43 @@ impl BitcoinD {
         )
         .expect("'getblockhash' returned an invalid block hash")
     }
+
+    /// Get information about this tx output, if it is in the best block chain and unspent.
+    pub fn utxoinfo(&self, outpoint: &OutPoint) -> Option<UtxoInfo> {
+        let res = self.make_node_request(
+            "gettxout",
+            &params!(
+                outpoint.txid,
+                outpoint.vout,
+                false // include_mempool
+            ),
+        );
+
+        // It returns null on "not found"
+        if res == Json::Null {
+            return None;
+        }
+
+        let confirmations = res
+            .get("confirmations")
+            .and_then(|c| c.as_i64())
+            .expect("'gettxout' didn't return a valid 'confirmations' value");
+        let bestblock = res
+            .get("bestblock")
+            .and_then(|bb| bb.as_str())
+            .and_then(|bb_str| BlockHash::from_str(bb_str).ok())
+            .expect("'gettxout' didn't return a valid 'bestblock' value");
+        Some(UtxoInfo {
+            confirmations,
+            bestblock,
+        })
+    }
+
+    /// Broadcast this transaction to the Bitcoin network
+    pub fn broadcast_tx(&self, tx: &BitcoinTransaction) -> Result<(), BitcoindError> {
+        let tx_hex = encode::serialize_hex(tx);
+        self.make_node_request_failible("sendrawtransaction", &params!(tx_hex)).map(|_| ())
+    }
 }
 
 /// Info about bitcoind's sync state
@@ -397,4 +434,11 @@ pub struct SyncInfo {
 pub struct ChainTip {
     pub height: i32,
     pub hash: BlockHash,
+}
+
+/// Info about a block chain UTXO
+#[derive(Debug)]
+pub struct UtxoInfo {
+    pub confirmations: i64,
+    pub bestblock: BlockHash,
 }

@@ -11,10 +11,10 @@ use daemonize::daemonize;
 use database::setup_db;
 use keys::read_or_create_noise_key;
 use revault_net::{
-    bitcoin::hashes::hex::ToHex,
     noise::PublicKey as NoisePubKey,
     sodiumoxide::{self, crypto::scalarmult::curve25519},
 };
+use revault_tx::bitcoin::{hashes::hex::ToHex, secp256k1};
 
 use std::{env, fs, os::unix::fs::DirBuilderExt, panic, path, process, time};
 
@@ -219,7 +219,8 @@ fn main() {
         }
     }
 
-    poller::main_loop(&db_path, &config, &bitcoind).unwrap_or_else(|e| {
+    let secp_ctx = secp256k1::Secp256k1::verification_only();
+    poller::main_loop(&db_path, &secp_ctx, &config, &bitcoind).unwrap_or_else(|e| {
         log::error!("Error in main loop: '{}'", e);
         process::exit(1);
     });
