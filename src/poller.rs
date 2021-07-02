@@ -5,7 +5,9 @@ use crate::{
     },
     config::Config,
     database::{
-        db_cancel_signatures, db_delegated_vaults, db_instance, schema::DbVault, DatabaseError,
+        db_cancel_signatures, db_instance, db_delegated_vaults, schema::DbVault,
+        DatabaseError, db_should_cancel_vault, db_should_not_cancel_vault
+
     },
 };
 use revault_tx::{
@@ -161,6 +163,7 @@ fn check_for_unvault(
             }
 
             if should_revault(&unvault_tx) {
+                db_should_cancel_vault(db_path, db_vault.id)?;
                 revault(
                     db_path,
                     secp,
@@ -169,6 +172,8 @@ fn check_for_unvault(
                     unvault_txin,
                     &deposit_desc,
                 )?;
+            } else {
+                db_should_not_cancel_vault(db_path, db_vault.id)?;
             }
         }
     }

@@ -34,6 +34,10 @@ CREATE TABLE instances (
  * Emergency transaction signatures in the 'signatures' table. If 'delegated' is set
  * to 1 it means that the Cancel and UnvaultEmergency signatures are present as well
  * and that we need to be watching for an Unvault transaction broadcast.
+ * 'should_cancel' is a ternary indicating whether:
+ *  - We should revault a triggered Unvault (1)
+ *  - We should let a triggered Unvault pass through (0)
+ *  - There is no Unvault attempt or we did not decide yet (NULL)
  */
 CREATE TABLE vaults (
     id INTEGER PRIMARY KEY NOT NULL,
@@ -43,6 +47,7 @@ CREATE TABLE vaults (
     derivation_index INTEGER NOT NULL,
     amount INTEGER NOT NULL,
     delegated INTEGER NOT NULL CHECK (delegated IN (0,1)),
+    should_cancel INTEGER CHECK (should_cancel IN (NULL, 0,1)),
     UNIQUE(deposit_txid, deposit_vout),
     FOREIGN KEY (instance_id) REFERENCES instances (id)
         ON UPDATE RESTRICT
@@ -129,6 +134,7 @@ pub struct DbVault {
     pub derivation_index: bip32::ChildNumber,
     pub amount: Amount,
     pub delegated: bool,
+    pub should_cancel: Option<bool>,
 }
 
 impl TryFrom<&rusqlite::Row<'_>> for DbVault {
@@ -156,6 +162,7 @@ impl TryFrom<&rusqlite::Row<'_>> for DbVault {
         let amount = Amount::from_sat(amount as u64);
 
         let delegated = row.get(6)?;
+        let should_cancel: Option<bool> = row.get(7)?;
 
         Ok(DbVault {
             id,
@@ -164,6 +171,7 @@ impl TryFrom<&rusqlite::Row<'_>> for DbVault {
             derivation_index,
             amount,
             delegated,
+            should_cancel,
         })
     }
 }

@@ -229,6 +229,33 @@ fn db_delegate_vault(
     })
 }
 
+/// Mark a vault as needing to be canceled
+pub fn db_should_cancel_vault(db_path: &path::Path, vault_id: i64) -> Result<(), DatabaseError> {
+    db_exec(&db_path, |db_tx| {
+        db_tx.execute(
+            "UPDATE vaults SET should_cancel = 1 WHERE id = (?1)",
+            params![vault_id],
+        )?;
+
+        Ok(())
+    })
+}
+
+/// Mark a vault as should not cancel
+pub fn db_should_not_cancel_vault(
+    db_path: &path::Path,
+    vault_id: i64,
+) -> Result<(), DatabaseError> {
+    db_exec(&db_path, |db_tx| {
+        db_tx.execute(
+            "UPDATE vaults SET should_cancel = 0 WHERE id = (?1)",
+            params![vault_id],
+        )?;
+
+        Ok(())
+    })
+}
+
 /// Remove a vault from the database by its id
 fn db_del_vault(db_path: &path::Path, vault_id: i64) -> Result<(), DatabaseError> {
     db_exec(db_path, |db_tx| {
@@ -264,11 +291,12 @@ fn db_vault(
     .map(|mut rows| rows.pop())
 }
 
-/// Get a list of all vaults we need to watch Unvault broadcast for
+/// Get a list of all vaults we need to watch Unvault broadcast for that weren't yet both
+/// unvaulted and taken a decision for.
 pub fn db_delegated_vaults(db_path: &path::Path) -> Result<Vec<DbVault>, DatabaseError> {
     db_query(
         db_path,
-        "SELECT * FROM vaults WHERE delegated = 1",
+        "SELECT * FROM vaults WHERE delegated = 1 AND should_cancel is NULL",
         [],
         |row| row.try_into(),
     )
@@ -647,6 +675,7 @@ mod tests {
                 derivation_index: deriv_a,
                 amount: amount_a,
                 delegated: false,
+                should_cancel: None,
             }
         );
         assert_eq!(
@@ -663,6 +692,7 @@ mod tests {
                 derivation_index: deriv_b,
                 amount: amount_b,
                 delegated: false,
+                should_cancel: None,
             }
         );
         assert_eq!(
@@ -713,6 +743,7 @@ mod tests {
                 derivation_index: deriv_a,
                 amount: amount_a,
                 delegated: true,
+                should_cancel: None,
             }
         );
         db_delegate_vault(&db_path, &outpoint_b, &unemer_sigs_b, &cancel_sigs_b).unwrap();
@@ -725,6 +756,7 @@ mod tests {
                 derivation_index: deriv_b,
                 amount: amount_b,
                 delegated: true,
+                should_cancel: None,
             }
         );
         assert_eq!(
@@ -765,6 +797,24 @@ mod tests {
                 .collect::<Vec<(secp256k1::PublicKey, secp256k1::Signature)>>(),
             cancel_sigs_b.to_vec()
         );
+
+        // And if we mark them as either 'to cancel' or 'to let go through', they won't be
+        // returned by db_delegated_vaults
+        db_should_cancel_vault(&db_path, 1).unwrap();
+        assert_eq!(
+            db_delegated_vaults(&db_path).unwrap(),
+            vec![DbVault {
+                id: 2,
+                instance_id: 1,
+                deposit_outpoint: outpoint_b,
+                derivation_index: deriv_b,
+                amount: amount_b,
+                delegated: true,
+                should_cancel: None,
+            }]
+        );
+        db_should_not_cancel_vault(&db_path, 2).unwrap();
+        assert_eq!(db_delegated_vaults(&db_path).unwrap(), vec![]);
 
         // And we can delete them
         assert_eq!(db_vaults(&db_path).unwrap().len(), 2);
