@@ -256,8 +256,26 @@ pub fn db_should_not_cancel_vault(
     })
 }
 
+/// Store the height at which we noticed this vaults' revocation tx (Cancel or Emer) to be
+/// confirmed. It doesn't mean it was confirmed at *this* height, but it's the "maximum possible
+/// height" at which it confirmed.
+pub fn db_revoc_confirmed(
+    db_path: &path::Path,
+    vault_id: i64,
+    height: i32,
+) -> Result<(), DatabaseError> {
+    db_exec(&db_path, |db_tx| {
+        db_tx.execute(
+            "UPDATE vaults SET revoc_height = (?1) WHERE id = (?2)",
+            params![height, vault_id],
+        )?;
+
+        Ok(())
+    })
+}
+
 /// Remove a vault from the database by its id
-fn db_del_vault(db_path: &path::Path, vault_id: i64) -> Result<(), DatabaseError> {
+pub fn db_del_vault(db_path: &path::Path, vault_id: i64) -> Result<(), DatabaseError> {
     db_exec(db_path, |db_tx| {
         db_tx.execute(
             "DELETE FROM signatures WHERE vault_id = (?1)",
@@ -297,6 +315,16 @@ pub fn db_delegated_vaults(db_path: &path::Path) -> Result<Vec<DbVault>, Databas
     db_query(
         db_path,
         "SELECT * FROM vaults WHERE delegated = 1 AND should_cancel is NULL",
+        [],
+        |row| row.try_into(),
+    )
+}
+
+/// Get a list of all vaults marked as needing to be canceled.
+pub fn db_canceling_vaults(db_path: &path::Path) -> Result<Vec<DbVault>, DatabaseError> {
+    db_query(
+        db_path,
+        "SELECT * FROM vaults WHERE should_cancel = 1",
         [],
         |row| row.try_into(),
     )
@@ -676,6 +704,7 @@ mod tests {
                 amount: amount_a,
                 delegated: false,
                 should_cancel: None,
+                revoc_height: None,
             }
         );
         assert_eq!(
@@ -693,6 +722,7 @@ mod tests {
                 amount: amount_b,
                 delegated: false,
                 should_cancel: None,
+                revoc_height: None,
             }
         );
         assert_eq!(
@@ -744,6 +774,7 @@ mod tests {
                 amount: amount_a,
                 delegated: true,
                 should_cancel: None,
+                revoc_height: None,
             }
         );
         db_delegate_vault(&db_path, &outpoint_b, &unemer_sigs_b, &cancel_sigs_b).unwrap();
@@ -757,6 +788,7 @@ mod tests {
                 amount: amount_b,
                 delegated: true,
                 should_cancel: None,
+                revoc_height: None,
             }
         );
         assert_eq!(
@@ -811,10 +843,42 @@ mod tests {
                 amount: amount_b,
                 delegated: true,
                 should_cancel: None,
+                revoc_height: None,
             }]
         );
         db_should_not_cancel_vault(&db_path, 2).unwrap();
         assert_eq!(db_delegated_vaults(&db_path).unwrap(), vec![]);
+
+        // We marked the first one as needing to be canceled, but not the second one.
+        assert_eq!(
+            db_canceling_vaults(&db_path).unwrap(),
+            vec![DbVault {
+                id: 1,
+                instance_id: 1,
+                deposit_outpoint: outpoint_a,
+                derivation_index: deriv_a,
+                amount: amount_a,
+                delegated: true,
+                should_cancel: Some(true),
+                revoc_height: None,
+            }]
+        );
+
+        // We can register a height at which a revocation tx confirmed.
+        db_revoc_confirmed(&db_path, 1, 10142101).unwrap();
+        assert_eq!(
+            db_vault(&db_path, &outpoint_a).unwrap().unwrap(),
+            DbVault {
+                id: 1,
+                instance_id: 1,
+                deposit_outpoint: outpoint_a,
+                derivation_index: deriv_a,
+                amount: amount_a,
+                delegated: true,
+                should_cancel: Some(true),
+                revoc_height: Some(10142101),
+            }
+        );
 
         // And we can delete them
         assert_eq!(db_vaults(&db_path).unwrap().len(), 2);

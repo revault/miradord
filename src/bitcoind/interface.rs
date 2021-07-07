@@ -1,5 +1,7 @@
 use crate::{bitcoind::BitcoindError, config::BitcoindConfig};
-use revault_tx::bitcoin::{BlockHash, OutPoint, Transaction as BitcoinTransaction, consensus::encode};
+use revault_tx::bitcoin::{
+    consensus::encode, BlockHash, OutPoint, Transaction as BitcoinTransaction,
+};
 
 use std::{
     any::Any,
@@ -418,7 +420,8 @@ impl BitcoinD {
     /// Broadcast this transaction to the Bitcoin network
     pub fn broadcast_tx(&self, tx: &BitcoinTransaction) -> Result<(), BitcoindError> {
         let tx_hex = encode::serialize_hex(tx);
-        self.make_node_request_failible("sendrawtransaction", &params!(tx_hex)).map(|_| ())
+        self.make_node_request_failible("sendrawtransaction", &params!(tx_hex))
+            .map(|_| ())
     }
 }
 

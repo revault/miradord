@@ -38,6 +38,8 @@ CREATE TABLE instances (
  *  - We should revault a triggered Unvault (1)
  *  - We should let a triggered Unvault pass through (0)
  *  - There is no Unvault attempt or we did not decide yet (NULL)
+ * 'revoc_height' is the *max* block height at which the transaction revoking this vault
+ * confirmed, or NULL.
  */
 CREATE TABLE vaults (
     id INTEGER PRIMARY KEY NOT NULL,
@@ -48,6 +50,7 @@ CREATE TABLE vaults (
     amount INTEGER NOT NULL,
     delegated INTEGER NOT NULL CHECK (delegated IN (0,1)),
     should_cancel INTEGER CHECK (should_cancel IN (NULL, 0,1)),
+    revoc_height INTEGER,
     UNIQUE(deposit_txid, deposit_vout),
     FOREIGN KEY (instance_id) REFERENCES instances (id)
         ON UPDATE RESTRICT
@@ -135,6 +138,7 @@ pub struct DbVault {
     pub amount: Amount,
     pub delegated: bool,
     pub should_cancel: Option<bool>,
+    pub revoc_height: Option<i32>,
 }
 
 impl TryFrom<&rusqlite::Row<'_>> for DbVault {
@@ -164,6 +168,8 @@ impl TryFrom<&rusqlite::Row<'_>> for DbVault {
         let delegated = row.get(6)?;
         let should_cancel: Option<bool> = row.get(7)?;
 
+        let revoc_height: Option<i32> = row.get(8)?;
+
         Ok(DbVault {
             id,
             instance_id,
@@ -172,6 +178,7 @@ impl TryFrom<&rusqlite::Row<'_>> for DbVault {
             amount,
             delegated,
             should_cancel,
+            revoc_height,
         })
     }
 }
