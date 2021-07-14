@@ -57,6 +57,10 @@ fn daemon_default() -> bool {
     false
 }
 
+fn listen_default() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 8383))
+}
+
 /// Everything we need to know for talking to bitcoind serenely
 #[derive(Debug, Clone, Deserialize)]
 pub struct BitcoindConfig {
@@ -112,8 +116,8 @@ pub struct Config {
     )]
     pub log_level: log::LevelFilter,
     /// <ip:port> to bind to
-    // TODO: have a default implem as in cosignerd
-    pub listen: Option<SocketAddr>,
+    #[serde(default = "listen_default")]
+    pub listen: SocketAddr,
 }
 
 #[derive(Debug)]
