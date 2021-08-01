@@ -133,6 +133,8 @@ fn process_sig_message<C: secp256k1::Verification>(
             deposit_utxo.value,
             &msg.signatures,
         )?;
+        log::debug!("Registered a new vault at '{}'", &msg.deposit_outpoint);
+
         Ok(SigResult {
             ack: true,
             txid: msg.txid,
@@ -154,6 +156,10 @@ fn process_sig_message<C: secp256k1::Verification>(
         }
         unemer_tx.finalize(secp)?;
         db_store_unemer_sigs(db_path, &msg.deposit_outpoint, &msg.signatures)?;
+        log::debug!(
+            "Got UnEmer transaction signatures for vault at '{}'",
+            &msg.deposit_outpoint
+        );
 
         Ok(SigResult {
             ack: true,
@@ -184,6 +190,10 @@ fn process_sig_message<C: secp256k1::Verification>(
         if !db_vault.delegated {
             db_delegate_vault(db_path, &msg.deposit_outpoint)?;
         }
+        log::debug!(
+            "Got Cancel transaction signatures for vault at '{}'. Now watching for Unvault broadcast.",
+            &msg.deposit_outpoint
+        );
 
         Ok(SigResult {
             ack: true,

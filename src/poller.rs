@@ -134,6 +134,10 @@ fn manage_cancel_attempts(
                 .expect("Impossible, the confirmation height is always <= tip");
             if n_confs > REORG_WATCH_LIMIT {
                 db_del_vault(db_path, db_vault.id)?;
+                log::info!(
+                    "Forgetting about consumed vault at '{}' after its Cancel transaction had '{}' confirmations.",
+                    &db_vault.deposit_outpoint, n_confs
+                );
             }
         } else {
             let cancel_outpoint = cancel_tx.deposit_txin(&deposit_desc).outpoint();
@@ -163,13 +167,16 @@ fn manage_cancel_attempts(
                 );
             } else {
                 // If the chain didn't change, and there is no Cancel UTXO at the best block there
-                // are only 2 possibilities: either the Cancel transaction is still unconfirmed
-                // (and therefore the Unvault UTXO is still present) or it was spent.
+                // are only 2 possibilities before the expiration of the CSV: either the Cancel
+                // transaction is still unconfirmed (and therefore the Unvault UTXO is still present)
+                // or it was spent.
                 if bitcoind.utxoinfo(&unvault_outpoint).is_none() {
                     if bitcoind.chain_tip().hash != current_tip.hash {
                         // TODO
                     }
 
+                    // FIXME: if timelock matured, do additional checks (is this Cancel still
+                    // broadcastable?)
                     db_revoc_confirmed(db_path, db_vault.id, current_tip.height)?;
                     log::debug!(
                         "Noticed at height '{}' that Cancel transaction '{}' was confirmed for vault at '{}'",
@@ -241,7 +248,7 @@ fn revault(
             e
         );
     } else {
-        log::trace!(
+        log::debug!(
             "Broadcasted Cancel transaction '{}'",
             encode::serialize_hex(&cancel_tx)
         );
@@ -277,7 +284,11 @@ fn check_for_unvault(
         let unvault_txin = unvault_tx.revault_unvault_txin(&unvault_desc);
 
         if let Some(utxoinfo) = bitcoind.utxoinfo(&unvault_txin.outpoint()) {
-            log::debug!("Got a confirmed Unvault UTXO: '{:?}'", utxoinfo);
+            log::debug!(
+                "Got a confirmed Unvault UTXO at '{}': '{:?}'",
+                &unvault_txin.outpoint(),
+                utxoinfo
+            );
 
             if current_tip.hash != utxoinfo.bestblock {
                 // TODO

@@ -45,6 +45,7 @@ class Miradord(TailableProc):
         self.unvault_desc = unvault_desc
         self.cpfp_desc = cpfp_desc
         self.emer_addr = emer_addr
+        self.bitcoind = bitcoind
 
         # The data is stored in a per-network directory. We need to create it
         # in order to write the Noise private key
@@ -90,7 +91,7 @@ class Miradord(TailableProc):
             f.write('network = "regtest"\n')
             f.write(f"cookie_path = '{bitcoind_cookie}'\n")
             f.write(f"addr = '127.0.0.1:{bitcoind.rpcport}'\n")
-            f.write("poll_interval_secs = 10\n")
+            f.write("poll_interval_secs = 5\n")
 
     def start(self):
         TailableProc.start(self)
@@ -195,3 +196,36 @@ class Miradord(TailableProc):
         assert resp["txid"] == txid  # Everything is synchronous
 
         return resp["ack"]
+
+    def watch_vault(self, deposit_outpoint, deposit_value, deriv_index):
+        """The deposit transaction must be confirmed. The deposit value is in sats."""
+        txs = self.get_signed_txs(deposit_outpoint, deposit_value)
+        emer_txid = self.bitcoind.rpc.decoderawtransaction(txs["emer"]["tx"])["txid"]
+        unemer_txid = self.bitcoind.rpc.decoderawtransaction(txs["unemer"]["tx"])[
+            "txid"
+        ]
+        cancel_txid = self.bitcoind.rpc.decoderawtransaction(txs["cancel"]["tx"])[
+            "txid"
+        ]
+
+        noise_conn = self.get_noise_conn()
+        assert self.send_sigs(
+            txs["emer"]["sigs"], emer_txid, deposit_outpoint, DERIV_INDEX, noise_conn
+        )
+        assert self.send_sigs(
+            txs["unemer"]["sigs"],
+            unemer_txid,
+            deposit_outpoint,
+            DERIV_INDEX,
+            noise_conn,
+        )
+        assert self.send_sigs(
+            txs["cancel"]["sigs"],
+            cancel_txid,
+            deposit_outpoint,
+            DERIV_INDEX,
+            noise_conn,
+        )
+        self.wait_for_log("Now watching for Unvault broadcast.")
+
+        return txs
