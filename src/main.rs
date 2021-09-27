@@ -195,9 +195,7 @@ fn main() {
     });
     log::info!(
         "Using Noise key '{}'. Stakehodler Noise key '{}'",
-        NoisePubKey(curve25519::scalarmult_base(&curve25519::Scalar(noise_secret.0)).0)
-            .0
-            .to_hex(),
+        noise_secret.public_key().0.to_hex(),
         &config.stakeholder_noise_key.0.to_hex()
     );
 
