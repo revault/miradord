@@ -165,10 +165,6 @@ impl BitcoinD {
                 thread::sleep(Duration::from_secs(1));
             }
             jsonrpc::Error::Json(ref err) => {
-                log::error!(
-                    "JSON serialization error when talking to bitcoind: '{}'",
-                    err
-                );
                 // Weird. A JSON serialization error? Just try again but
                 // fail fast anyways as it should not happen.
                 log::error!(
