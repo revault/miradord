@@ -5,3 +5,30 @@ authors = ["Antoine Poinsot <darosior@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
+revault_tx = { git = "https://github.com/darosior/revault_tx", branch = "refactorings", features = ["use-serde"] }
+revault_net = { git = "https://github.com/darosior/revault_net", branch = "update_tx" }
+
+# Don't reinvent the wheel
+dirs = "3.0"
+
+# Used for the config and by revault_net already
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.5"
+
+# Logging stuff, trying to KIS (and minimal)
+log = "0.4"
+fern = "0.6"
+
+# To talk to bitcoind
+jsonrpc = "0.12"
+serde_json = { version = "1.0", features = ["raw_value"] }
+
+# Used for daemonization
+libc = "0.2"
+
+# For the database
+rusqlite = { version = "0.25.3", features = ["bundled", "unlock_notify"] }
+
+# We want to have a backtrace on panic, and the stdlib doesn't have a programmatic
+# interface yet to work with our custom panic hook.
+backtrace = "0.3.60"
