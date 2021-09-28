@@ -1,6 +1,5 @@
-from bitcoin.core import COIN
 from fixtures import *
-from test_framework.utils import DEPOSIT_ADDRESS, DERIV_INDEX
+from test_framework.utils import COIN, DEPOSIT_ADDRESS, DERIV_INDEX
 
 
 def test_simple_unvault_broadcast(miradord, bitcoind):

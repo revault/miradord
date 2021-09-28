@@ -74,8 +74,8 @@ class AuthServiceProxy():
         self._service_name = service_name
         self.ensure_ascii = ensure_ascii  # can be toggled on the fly by tests
         self.__url = urllib.parse.urlparse(service_url)
-        user = None if self.__url.username is None else self.__url.username.encode('utf8')
-        passwd = None if self.__url.password is None else self.__url.password.encode('utf8')
+        user = b'' if self.__url.username is None else self.__url.username.encode('utf8')
+        passwd = b'' if self.__url.password is None else self.__url.password.encode('utf8')
         authpair = user + b':' + passwd
         self.__auth_header = b'Basic ' + base64.b64encode(authpair)
         self.timeout = timeout
