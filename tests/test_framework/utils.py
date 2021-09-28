@@ -19,7 +19,7 @@ VERBOSE = os.getenv("VERBOSE", "0") == "1"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "trace")
 assert LOG_LEVEL in ["trace", "debug", "info", "warn", "error"]
 
-COIN = 10**8
+COIN = 10 ** 8
 
 # FIXME: This is a hack until we have a python-revault-tx. We use static xprivs
 # and a static deposit address across all tests
