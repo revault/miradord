@@ -1,3 +1,6 @@
+# This file was taken from the Bitcoin Core project in September 2021.
+# Copyright (c) 2021 The Bitcoin Core developers
+#
 # Copyright (c) 2011 Jeff Garzik
 #
 # Previous copyright, from python-jsonrpc/jsonrpc/proxy.py:
