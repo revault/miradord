@@ -1,8 +1,13 @@
 use crate::{bitcoind::BitcoindError, config::BitcoindConfig};
+use revault_tx::bitcoin::{
+    consensus::encode, BlockHash, OutPoint, Transaction as BitcoinTransaction,
+};
 
 use std::{
     any::Any,
-    fs, process, thread,
+    fs, process,
+    str::FromStr,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -282,7 +287,7 @@ impl BitcoinD {
             progress: chaininfo
                 .get("verificationprogress")
                 .and_then(|i| i.as_f64())
-                .expect("No valid 'initialblockdownload' in getblockchaininfo response?"),
+                .expect("No valid 'verificationprogress' in getblockchaininfo response?"),
         }
     }
 
@@ -351,6 +356,73 @@ impl BitcoinD {
 
         Ok(())
     }
+
+    /// Get the (height, hash) pair of the current best block
+    pub fn chain_tip(&self) -> ChainTip {
+        let chaininfo = self.make_node_request("getblockchaininfo", &[]);
+        ChainTip {
+            height: chaininfo
+                .get("blocks")
+                .and_then(|b| b.as_i64())
+                .expect("No valid 'blocks' in getblockchaininfo response?")
+                as i32,
+            hash: BlockHash::from_str(
+                chaininfo
+                    .get("bestblockhash")
+                    .and_then(|i| i.as_str())
+                    .expect("No valid 'bestblockhash' in getblockchaininfo response?"),
+            )
+            .expect("Not a valid block hash in 'bestblockhash' field?"),
+        }
+    }
+
+    /// Get the hash of the block at this height
+    pub fn block_hash(&self, height: i32) -> BlockHash {
+        BlockHash::from_str(
+            self.make_node_request("getblockhash", &params!(height))
+                .as_str()
+                .expect("'getblockhash' didn't return a string."),
+        )
+        .expect("'getblockhash' returned an invalid block hash")
+    }
+
+    /// Get information about this tx output, if it is in the best block chain and unspent.
+    pub fn utxoinfo(&self, outpoint: &OutPoint) -> Option<UtxoInfo> {
+        let res = self.make_node_request(
+            "gettxout",
+            &params!(
+                outpoint.txid,
+                outpoint.vout,
+                false // include_mempool
+            ),
+        );
+
+        // It returns null on "not found"
+        if res == Json::Null {
+            return None;
+        }
+
+        let confirmations = res
+            .get("confirmations")
+            .and_then(|c| c.as_i64())
+            .expect("'gettxout' didn't return a valid 'confirmations' value");
+        let bestblock = res
+            .get("bestblock")
+            .and_then(|bb| bb.as_str())
+            .and_then(|bb_str| BlockHash::from_str(bb_str).ok())
+            .expect("'gettxout' didn't return a valid 'bestblock' value");
+        Some(UtxoInfo {
+            confirmations,
+            bestblock,
+        })
+    }
+
+    /// Broadcast this transaction to the Bitcoin network
+    pub fn broadcast_tx(&self, tx: &BitcoinTransaction) -> Result<(), BitcoindError> {
+        let tx_hex = encode::serialize_hex(tx);
+        self.make_node_request_failible("sendrawtransaction", &params!(tx_hex))
+            .map(|_| ())
+    }
 }
 
 /// Info about bitcoind's sync state
@@ -359,4 +431,17 @@ pub struct SyncInfo {
     pub blocks: u64,
     pub ibd: bool,
     pub progress: f64,
+}
+
+/// Block height and block hash of what we consider to be the block chain tip
+pub struct ChainTip {
+    pub height: i32,
+    pub hash: BlockHash,
+}
+
+/// Info about a block chain UTXO
+#[derive(Debug)]
+pub struct UtxoInfo {
+    pub confirmations: i64,
+    pub bestblock: BlockHash,
 }

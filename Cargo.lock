@@ -66,15 +66,15 @@ dependencies = [
 
 [[package]]
 name = "bech32"
-version = "0.7.3"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dabbe35f96fb9507f7330793dc490461b2962659ac5d427181e451a623751d1"
+checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
 
 [[package]]
 name = "bitcoin"
-version = "0.26.2"
+version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6742ec672d3f12506f4ac5c0d853926ff1f94e675f60ffd3224039972bf663f1"
+checksum = "9a41df6ad9642c5c15ae312dd3d074de38fd3eb7cc87ad4ce10f90292a83fe4d"
 dependencies = [
  "bech32",
  "bitcoin_hashes",
@@ -84,9 +84,9 @@ dependencies = [
 
 [[package]]
 name = "bitcoin_hashes"
-version = "0.9.7"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ce18265ec2324ad075345d5814fbeed4f41f0a660055dc78840b74d19b874b1"
+checksum = "006cc91e1a1d99819bc5b8214be3555c1f0611b169f527a1fdc54ed1f2b745b0"
 dependencies = [
  "serde",
 ]
@@ -274,9 +274,9 @@ checksum = "b16bd47d9e329435e309c58469fe0791c2d0d1ba96ec0954152a5ae2b04387dc"
 
 [[package]]
 name = "miniscript"
-version = "5.1.0"
+version = "6.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71f455be59a359d50370c4f587afbc5739c862e684c5afecae80ab93e7474b4e"
+checksum = "d69450033bf162edf854d4aacaff82ca5ef34fa81f6cf69e1c81a103f0834997"
 dependencies = [
  "bitcoin",
 ]
@@ -375,8 +375,9 @@ dependencies = [
 
 [[package]]
 name = "revault_net"
-version = "0.0.1"
-source = "git+https://github.com/darosior/revault_net?branch=update_tx#1fdfd8e0bf202b03e9d62f9f621d6a7fa0bcb3a5"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d7581647856ce926493049324bbd0731fb67a34d6ecea676773fd7266617954"
 dependencies = [
  "bitcoin",
  "log",
@@ -389,8 +390,9 @@ dependencies = [
 
 [[package]]
 name = "revault_tx"
-version = "0.2.1"
-source = "git+https://github.com/darosior/revault_tx?branch=refactorings#57750c29cd0087e11b4a160486f8281458615eb2"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5342b21d7e70d39b01ab4fd9aa207849fca9d438f1930c67f5d9de27b21dfa4"
 dependencies = [
  "base64",
  "bitcoinconsensus",
@@ -510,9 +512,9 @@ dependencies = [
 
 [[package]]
 name = "signature"
-version = "1.3.0"
+version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f0242b8e50dd9accdd56170e94ca1ebd223b098eb9c83539a6e367d0f36ae68"
+checksum = "c19772be3c4dd2ceaacf03cb41d5885f2a02c4d8804884918e3a258480803335"
 
 [[package]]
 name = "smallvec"

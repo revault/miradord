@@ -3,6 +3,7 @@ mod config;
 mod daemonize;
 mod database;
 mod keys;
+mod poller;
 
 use bitcoind::{load_watchonly_wallet, start_bitcoind, wait_bitcoind_synced};
 use config::{config_folder_path, Config};
@@ -10,12 +11,12 @@ use daemonize::daemonize;
 use database::setup_db;
 use keys::read_or_create_noise_key;
 use revault_net::{
-    bitcoin::hashes::hex::ToHex,
     noise::PublicKey as NoisePubKey,
     sodiumoxide::{self, crypto::scalarmult::curve25519},
 };
+use revault_tx::bitcoin::{hashes::hex::ToHex, secp256k1};
 
-use std::{env, fs, os::unix::fs::DirBuilderExt, path, process, time, panic};
+use std::{env, fs, os::unix::fs::DirBuilderExt, panic, path, process, time};
 
 const DATABASE_FILENAME: &str = "mirarod.sqlite3";
 const VAULT_WATCHONLY_FILENAME: &str = "vault_watchonly";
@@ -76,7 +77,13 @@ fn setup_panic_hook() {
 
         let bt = backtrace::Backtrace::new();
         if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
-            log::error!("panic occurred at line {} of file {}: {:?}\n{:?}", line, file, s, bt);
+            log::error!(
+                "panic occurred at line {} of file {}: {:?}\n{:?}",
+                line,
+                file,
+                s,
+                bt
+            );
         } else {
             log::error!("panic occurred at line {} of file {}\n{:?}", line, file, bt);
         }
@@ -116,7 +123,7 @@ fn main() {
         process::exit(1);
     });
 
-    let mut data_dir = config.data_dir.unwrap_or_else(|| {
+    let mut data_dir = config.data_dir.clone().unwrap_or_else(|| {
         config_folder_path().unwrap_or_else(|e| {
             eprintln!("Error getting default data directory: '{}'.", e);
             process::exit(1);
@@ -211,4 +218,10 @@ fn main() {
             });
         }
     }
+
+    let secp_ctx = secp256k1::Secp256k1::verification_only();
+    poller::main_loop(&db_path, &secp_ctx, &config, &bitcoind).unwrap_or_else(|e| {
+        log::error!("Error in main loop: '{}'", e);
+        process::exit(1);
+    });
 }
