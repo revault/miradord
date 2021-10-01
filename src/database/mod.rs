@@ -4,7 +4,7 @@ use revault_tx::{
     bitcoin::{secp256k1, util::bip32, Amount, Network, OutPoint},
     scripts::{CpfpDescriptor, DepositDescriptor, UnvaultDescriptor},
 };
-use schema::{DbInstance, DbSignature, DbVault, SigTxType, SCHEMA};
+use schema::{DbInstance, DbSignature, DbVault, SigTxType, DbAllocation, SCHEMA};
 
 use std::{collections, convert::TryInto, fs, io, os::unix::fs::OpenOptionsExt, path, time};
 
@@ -388,6 +388,76 @@ pub fn db_cancel_signatures(
     vault_id: i64,
 ) -> Result<Vec<DbSignature>, DatabaseError> {
     db_sigs_by_type(db_path, vault_id, SigTxType::Cancel)
+}
+
+/// Get the allocation of a given outpoint if it is in the database
+pub fn db_allocation(
+    db_path: &path::Path,
+    wallet_outpoint: &OutPoint,
+) -> Result<Option<DbAllocation>, DatabaseError> {
+    let txid = wallet_outpoint.txid.to_vec();
+    let vout = wallet_outpoint.vout;
+
+    db_query(
+        db_path,
+        "SELECT * FROM allocation WHERE txid = (?1) AND vout = (?2)",
+        params![txid, vout],
+        |row| row.try_into(),
+    )
+    .map(|mut rows| rows.pop())
+}
+
+
+/// Update the allocation table with a collection of new wallet outpoints for a vault
+pub fn db_new_allocation(
+    db_path: &path::Path,
+    wallet_outpoints: &[OutPoint],
+    vault_id: i64,
+) -> Result<(), DatabaseError> {
+    db_exec(db_path, |db_tx| {
+        for wallet_outpoint in wallet_outpoints {
+            let txid = wallet_outpoint.txid.to_vec();
+            let vout = wallet_outpoint.vout;
+            db_tx.execute(
+                "INSERT INTO allocation (txid, vout, vault_id)
+                 VALUES (?1, ?2, ?3)",
+                params![txid, vout, vault_id],
+            )?;
+        }
+
+        Ok(())
+    })
+}
+
+// Delete specific allocation row associated with the given wallet outpoint
+pub fn db_del_allocation(
+    db_path: &path::Path,
+    wallet_outpoint: &OutPoint,
+) -> Result<(), DatabaseError> {
+    let txid = wallet_outpoint.txid.to_vec();
+    let vout = wallet_outpoint.vout;
+
+    db_exec(db_path, |db_tx| {
+        db_tx.execute(
+            "DELETE FROM allocation WHERE txid = (?1) AND vout = (?2)",
+            params![txid, vout])?;
+
+        Ok(())
+    })
+}
+
+// Clear all allocation rows associated with the given vault id
+pub fn db_clear_vault_allocation(
+    db_path: &path::Path,
+    vault_id: i64,
+) -> Result<(), DatabaseError> {
+    db_exec(db_path, |db_tx| {
+        db_tx.execute(
+            "DELETE FROM allocation WHERE vault_id = (?1)",
+            params![vault_id])?;
+
+        Ok(())
+    })
 }
 
 // Create the db file with RW permissions only for the user
@@ -928,5 +998,69 @@ mod tests {
 
         // Cleanup
         fs::remove_file(&db_path).unwrap();
+    }
+
+    // Sanity check we can create new allocations and delete them individually by outpoint
+    // or collectively by vault
+    #[test]
+    fn db_allocate() {
+        let db_path = get_db();
+        let outpoint_a = OutPoint::from_str(
+            "5bebdb97b54e2268b3fccd4aeea99419d87a92f88f27e906ceea5e863946a731:0",
+        ).unwrap();
+        let outpoint_b = OutPoint::from_str(
+            "69a747cd1ea7ce4904e6173b06a4a83e0df173661046e70f5128b3c9bef8241d:0",
+        )
+        .unwrap();
+        let outpoint_c = OutPoint::from_str(
+            "5bebdb97b54e2268b3fccd4aeea99419d87a92f88f27e906ceea5e863946a731:1",
+        )
+        .unwrap();
+        let vault_outpoint = OutPoint::from_str(
+            "69a747cd1ea7ce4904e6173b06a4a83e0df173661046e70f5128b3c9bef8241d:1",
+        )
+        .unwrap();
+        let vault_id: i64 = 1;
+        // We'll fail to insert if no vault exists with the given id
+        db_new_allocation(&db_path, &[outpoint_a], vault_id).unwrap_err();
+
+        // Create the vault
+        let deriv = bip32::ChildNumber::from(32);
+        let amount = Amount::from_sat(i64::MAX as u64 - 100_000);
+        let emer_sigs: collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = [
+            dummy_sig!(secp256k1::Signature::from_str("304402200b4025e855ac108cf4f5114c3a8af9f8122023ffa971c5de8a8bc3f67d18749902202cc9b7d36f57dbe70f8826fac13838c6757fe18fb4572328c76dd5b55e452528").unwrap()),
+            dummy_sig!(secp256k1::Signature::from_str("3045022100cc110b2dc66b9a116f50c61548d33f589d00ef57fb2fa784100ffb84e1577faf02206eec4e600f76f347b2014752a3619df8b2406fa61a34f0ec01ce4900f0b22083").unwrap())
+        ].iter().copied().collect();
+        db_new_vault(&db_path, &vault_outpoint, deriv, amount, &emer_sigs).unwrap();
+
+        // Get a valid vault_id
+        let vault_id = db_vault(&db_path, &vault_outpoint).unwrap().unwrap().id;
+
+        // Now we can insert allocations and query an allocation
+        db_new_allocation(&db_path, &[outpoint_a, outpoint_b, outpoint_c], vault_id).unwrap();
+        assert_eq!(
+            db_allocation(&db_path, &outpoint_a).unwrap().unwrap(),
+            DbAllocation {
+                id: 1,
+                wallet_outpoint: outpoint_a,
+                vault_id: vault_id,
+            }
+        );
+
+        // We can't insert the same allocation twice
+        db_new_allocation(&db_path, &[outpoint_a], vault_id).unwrap_err();
+
+        // We can delete the allocation given the outpoint
+        db_del_allocation(&db_path, &outpoint_a).unwrap();
+        assert!(db_allocation(&db_path, &outpoint_a).unwrap().is_none());
+
+        // We can clear all allocations for the given vault
+        assert!(db_allocation(&db_path, &outpoint_b).unwrap().is_some());
+        assert!(db_allocation(&db_path, &outpoint_c).unwrap().is_some());
+        db_clear_vault_allocation(&db_path, vault_id).unwrap();
+
+        // Now there's no remaining allocations
+        assert!(db_allocation(&db_path, &outpoint_b).unwrap().is_none());
+        assert!(db_allocation(&db_path, &outpoint_c).unwrap().is_none());
     }
 }
