@@ -1,6 +1,6 @@
 use crate::{bitcoind::BitcoindError, config::BitcoindConfig};
 use revault_tx::bitcoin::{
-    consensus::encode, BlockHash, OutPoint, Transaction as BitcoinTransaction,
+    consensus::encode, Amount, BlockHash, OutPoint, Transaction as BitcoinTransaction,
 };
 
 use std::{
@@ -165,10 +165,6 @@ impl BitcoinD {
                 thread::sleep(Duration::from_secs(1));
             }
             jsonrpc::Error::Json(ref err) => {
-                log::error!(
-                    "JSON serialization error when talking to bitcoind: '{}'",
-                    err
-                );
                 // Weird. A JSON serialization error? Just try again but
                 // fail fast anyways as it should not happen.
                 log::error!(
@@ -411,9 +407,15 @@ impl BitcoinD {
             .and_then(|bb| bb.as_str())
             .and_then(|bb_str| BlockHash::from_str(bb_str).ok())
             .expect("'gettxout' didn't return a valid 'bestblock' value");
+        let value = res
+            .get("value")
+            .and_then(|v| v.as_f64())
+            .and_then(|v| Amount::from_btc(v).ok())
+            .expect("'gettxout' didn't return a valid 'value' entry");
         Some(UtxoInfo {
             confirmations,
             bestblock,
+            value,
         })
     }
 
@@ -444,4 +446,5 @@ pub struct ChainTip {
 pub struct UtxoInfo {
     pub confirmations: i64,
     pub bestblock: BlockHash,
+    pub value: Amount,
 }

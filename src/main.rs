@@ -3,6 +3,7 @@ mod config;
 mod daemonize;
 mod database;
 mod keys;
+mod listener;
 mod poller;
 
 use bitcoind::{load_watchonly_wallet, start_bitcoind, wait_bitcoind_synced};
@@ -10,13 +11,14 @@ use config::{config_folder_path, Config};
 use daemonize::daemonize;
 use database::setup_db;
 use keys::read_or_create_noise_key;
+use listener::listener_main;
 use revault_net::{
     noise::PublicKey as NoisePubKey,
     sodiumoxide::{self, crypto::scalarmult::curve25519},
 };
 use revault_tx::bitcoin::{hashes::hex::ToHex, secp256k1};
 
-use std::{env, fs, os::unix::fs::DirBuilderExt, panic, path, process, time};
+use std::{env, fs, os::unix::fs::DirBuilderExt, panic, path, process, sync, thread, time};
 
 const DATABASE_FILENAME: &str = "mirarod.sqlite3";
 const VAULT_WATCHONLY_FILENAME: &str = "vault_watchonly";
@@ -169,9 +171,11 @@ fn main() {
             log::error!("Error setting up bitcoind RPC connection: '{}'", e);
             process::exit(1);
         });
+    let bitcoind = sync::Arc::new(bitcoind);
 
     log::info!("Checking if bitcoind is synced");
     wait_bitcoind_synced(&bitcoind);
+    log::info!("bitcoind now synced");
 
     load_watchonly_wallet(&bitcoind, vault_watchonly_path).unwrap_or_else(|e| {
         log::error!("Error loading vault watchonly wallet: '{}'", e);
@@ -190,10 +194,9 @@ fn main() {
         process::exit(1);
     });
     log::info!(
-        "Using Noise key '{}'.",
-        NoisePubKey(curve25519::scalarmult_base(&curve25519::Scalar(noise_secret.0)).0)
-            .0
-            .to_hex()
+        "Using Noise key '{}'. Stakehodler Noise key '{}'",
+        noise_secret.public_key().0.to_hex(),
+        &config.stakeholder_noise_key.0.to_hex()
     );
 
     if config.daemon {
@@ -218,6 +221,20 @@ fn main() {
             });
         }
     }
+
+    thread::spawn({
+        let _db_path = db_path.clone();
+        let _config = config.clone();
+        let _bitcoind = bitcoind.clone();
+        move || {
+            listener_main(&_db_path, &_config, _bitcoind, &noise_secret).unwrap_or_else(|e| {
+                log::error!("Error in listener loop: '{}'", e);
+                process::exit(1);
+            })
+        }
+    });
+
+    log::info!("Started miradord.",);
 
     let secp_ctx = secp256k1::Secp256k1::verification_only();
     poller::main_loop(&db_path, &secp_ctx, &config, &bitcoind).unwrap_or_else(|e| {

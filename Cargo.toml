@@ -6,7 +6,7 @@ edition = "2018"
 
 [dependencies]
 revault_tx = { version = "0.3.0", features = ["use-serde"] }
-revault_net = { version = "0.1.0", branch = "update_tx" }
+revault_net = "0.1.0"
 
 # Don't reinvent the wheel
 dirs = "3.0"
@@ -31,4 +31,7 @@ rusqlite = { version = "0.25.3", features = ["bundled", "unlock_notify"] }
 
 # We want to have a backtrace on panic, and the stdlib doesn't have a programmatic
 # interface yet to work with our custom panic hook.
-backtrace = "0.3.60"
+backtrace = "0.3"
+
+[dev-dependencies]
+fastrand = "1.4.0"
