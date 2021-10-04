@@ -72,6 +72,18 @@ CREATE TABLE signatures (
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
 );
+
+/* Allocation map linking unspent outputs from the WT wallet to vaults it is watching
+ */
+CREATE TABLE allocation (
+    id INTEGER PRIMARY KEY NOT NULL,
+    txid BLOB NOT NULL,
+    vout INTEGER NOT NULL,
+    vault_id INTEGER NOT NULL,
+    FOREIGN KEY (vault_id) REFERENCES vaults (id)
+    CONSTRAINT unique_alloc UNIQUE (txid, vout, vault_id)
+);
+
 ";
 
 /// A row in the "instances" table
@@ -240,6 +252,39 @@ impl TryFrom<&rusqlite::Row<'_>> for DbSignature {
             tx_type,
             pubkey,
             signature,
+        })
+    }
+}
+
+
+/// A row in the "allocation" table
+#[derive(Clone, Debug, PartialEq)]
+pub struct DbAllocation {
+    pub id: i64,
+    pub wallet_outpoint: OutPoint,
+    pub vault_id: i64,
+}
+
+impl TryFrom<&rusqlite::Row<'_>> for DbAllocation {
+    type Error = rusqlite::Error;
+
+    fn try_from(row: &rusqlite::Row) -> Result<Self, Self::Error> {
+        let id: i64 = row.get(0)?;
+        let txid: Vec<u8> = row.get(1)?;
+        let txid: Txid = encode::deserialize(&txid)
+            .expect("Insane db: invalid txid in allocation row");
+        let vout: u32 = row.get(2)?;
+        let wallet_outpoint = OutPoint {
+            txid,
+            vout,
+        };
+
+        let vault_id = row.get(3)?;
+
+        Ok(DbAllocation {
+            id,
+            wallet_outpoint,
+            vault_id,
         })
     }
 }
