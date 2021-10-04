@@ -126,7 +126,7 @@ class Bitcoind(TailableProc):
 
     def generate_blocks_censor(self, n, txids):
         """Generate {n} blocks ignoring {txids}"""
-        fee_delta = 1000000
+        fee_delta = COIN
         for txid in txids:
             self.rpc.prioritisetransaction(txid, None, -fee_delta)
         self.generate_block(n)

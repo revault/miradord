@@ -10,6 +10,8 @@ from test_framework.utils import (
     LOG_LEVEL,
     get_signed_txs,
     STKS_XPRIVS,
+    MANS_XPRIVS,
+    COSIG_PRIVKEYS,
     DERIV_INDEX,
     TIMEOUT,
 )
@@ -115,6 +117,8 @@ class Miradord(TailableProc):
         """
         return get_signed_txs(
             STKS_XPRIVS,
+            MANS_XPRIVS,
+            COSIG_PRIVKEYS,
             self.deposit_desc,
             self.unvault_desc,
             self.cpfp_desc,
