@@ -39,7 +39,8 @@ CREATE TABLE instances (
  *  - We should let a triggered Unvault pass through (0)
  *  - There is no Unvault attempt or we did not decide yet (NULL)
  * 'revoc_height' is the *max* block height at which the transaction revoking this vault
- * confirmed, or NULL.
+ * confirmed, or NULL. Note that a non-NULL 'revoc_height' does *not* mean that our
+ * Cancel transaction was successfully confirmed.
  */
 CREATE TABLE vaults (
     id INTEGER PRIMARY KEY NOT NULL,

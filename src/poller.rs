@@ -128,7 +128,6 @@ fn manage_cancel_attempts(
             let n_confs = current_tip
                 .height
                 .checked_add(1)
-                // FIXME all heights should be i32s
                 .expect("A block height>2147483647?")
                 .checked_sub(conf_height)
                 .expect("Impossible, the confirmation height is always <= tip");
@@ -175,15 +174,38 @@ fn manage_cancel_attempts(
                         // TODO
                     }
 
-                    // FIXME: if timelock matured, do additional checks (is this Cancel still
-                    // broadcastable?)
+                    let csv: i32 = config
+                        .scripts_config
+                        .unvault_descriptor
+                        .csv_value()
+                        .try_into()
+                        .expect("CSV value doesn't fit in i32?");
+                    let unvault_height = db_vault
+                        .unvault_height
+                        .expect("No unvault_height for unvaulted vault?");
+                    if current_tip.height < unvault_height + csv {
+                        log::debug!(
+                            "Noticed at height '{}' that Cancel transaction '{}' was confirmed for vault at '{}'",
+                            current_tip.height,
+                            cancel_tx.txid(),
+                            &db_vault.deposit_outpoint,
+                        );
+                    } else {
+                        // If the timelock matured and we have no confirmed Cancel UTxO, either:
+                        //  - a Spend transaction has spent the Unvault txo.
+                        //  - another Cancel transaction was mined
+                        //  - our Cancel transaction was mined but spent again
+                        // In this case we just set the revocation height to the tip as a hack
+                        // to still have it expire after REORG_WATCH_LIMIT
+                        log::info!(
+                            "Noticed at height '{}' that Unvault UTxO '{}' was spent for vault at '{}', \
+                             but our Cancel transaction output is not part of the UTxO set.",
+                            current_tip.height,
+                            unvault_outpoint,
+                            &db_vault.deposit_outpoint,
+                        );
+                    }
                     db_revoc_confirmed(db_path, db_vault.id, current_tip.height)?;
-                    log::debug!(
-                        "Noticed at height '{}' that Cancel transaction '{}' was confirmed for vault at '{}'",
-                        current_tip.height,
-                        cancel_tx.txid(),
-                        &db_vault.deposit_outpoint,
-                    );
                 } else {
                     log::debug!("Cancel transaction '{}' for vault at '{}' is still unconfirmed at height '{}'",
                                 cancel_tx.txid(), &db_vault.deposit_outpoint, current_tip.height);
@@ -291,7 +313,7 @@ fn check_for_unvault(
                 .confirmations
                 .try_into()
                 .expect("A number of confs that doesn't fit in a i32?");
-            let unvault_height = current_tip.height - confs - 1;
+            let unvault_height = current_tip.height - (confs - 1);
             assert!(confs > 0 && unvault_height > 0);
             log::debug!(
                 "Got a confirmed Unvault UTXO at '{}': '{:?}'",
