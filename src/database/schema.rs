@@ -50,6 +50,7 @@ CREATE TABLE vaults (
     amount INTEGER NOT NULL,
     delegated INTEGER NOT NULL CHECK (delegated IN (0,1)),
     should_cancel INTEGER CHECK (should_cancel IN (NULL, 0,1)),
+    unvault_height INTEGER,
     revoc_height INTEGER,
     UNIQUE(deposit_txid, deposit_vout),
     FOREIGN KEY (instance_id) REFERENCES instances (id)
@@ -138,6 +139,7 @@ pub struct DbVault {
     pub amount: Amount,
     pub delegated: bool,
     pub should_cancel: Option<bool>,
+    pub unvault_height: Option<i32>,
     pub revoc_height: Option<i32>,
 }
 
@@ -168,7 +170,8 @@ impl TryFrom<&rusqlite::Row<'_>> for DbVault {
         let delegated = row.get(6)?;
         let should_cancel: Option<bool> = row.get(7)?;
 
-        let revoc_height: Option<i32> = row.get(8)?;
+        let unvault_height: Option<i32> = row.get(8)?;
+        let revoc_height: Option<i32> = row.get(9)?;
 
         Ok(DbVault {
             id,
@@ -178,6 +181,7 @@ impl TryFrom<&rusqlite::Row<'_>> for DbVault {
             amount,
             delegated,
             should_cancel,
+            unvault_height,
             revoc_height,
         })
     }

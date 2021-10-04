@@ -284,18 +284,23 @@ fn check_for_unvault(
         let unvault_txin = unvault_tx.revault_unvault_txin(&unvault_desc);
 
         if let Some(utxoinfo) = bitcoind.utxoinfo(&unvault_txin.outpoint()) {
+            if current_tip.hash != utxoinfo.bestblock {
+                // TODO
+            }
+            let confs: i32 = utxoinfo
+                .confirmations
+                .try_into()
+                .expect("A number of confs that doesn't fit in a i32?");
+            let unvault_height = current_tip.height - confs - 1;
+            assert!(confs > 0 && unvault_height > 0);
             log::debug!(
                 "Got a confirmed Unvault UTXO at '{}': '{:?}'",
                 &unvault_txin.outpoint(),
                 utxoinfo
             );
 
-            if current_tip.hash != utxoinfo.bestblock {
-                // TODO
-            }
-
             if should_revault(&unvault_tx) {
-                db_should_cancel_vault(db_path, db_vault.id)?;
+                db_should_cancel_vault(db_path, db_vault.id, unvault_height)?;
                 revault(
                     db_path,
                     secp,
@@ -305,7 +310,7 @@ fn check_for_unvault(
                     &deposit_desc,
                 )?;
             } else {
-                db_should_not_cancel_vault(db_path, db_vault.id)?;
+                db_should_not_cancel_vault(db_path, db_vault.id, unvault_height)?;
             }
         }
     }
