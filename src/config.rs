@@ -1,3 +1,5 @@
+use crate::plugins::Plugin;
+
 use std::{io, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
 use revault_net::noise::PublicKey as NoisePubkey;
@@ -45,6 +47,49 @@ where
     log::LevelFilter::from_str(&level_str).map_err(de::Error::custom)
 }
 
+fn toml_to_json(toml_value: toml::Value) -> serde_json::Value {
+    match toml_value {
+        toml::Value::String(s) => serde_json::Value::String(s),
+        toml::Value::Integer(i) => serde_json::Value::Number(i.into()),
+        toml::Value::Float(f) => serde_json::Value::Number(
+            serde_json::Number::from_f64(f).expect("Infinite float in config?"),
+        ),
+        toml::Value::Boolean(b) => serde_json::Value::Bool(b),
+        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
+        toml::Value::Array(a) => {
+            serde_json::Value::Array(a.into_iter().map(toml_to_json).collect())
+        }
+        toml::Value::Table(t) => {
+            serde_json::Value::Object(t.into_iter().map(|(k, v)| (k, toml_to_json(v))).collect())
+        }
+    }
+}
+
+fn deserialize_plugins<'de, D>(deserializer: D) -> Result<Vec<Plugin>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let objects = Vec::<toml::Value>::deserialize(deserializer)?;
+    objects
+        .into_iter()
+        .map(|obj| {
+            let path_str =
+                obj.get("path")
+                    .map(|v| v.as_str())
+                    .flatten()
+                    .ok_or(de::Error::custom(
+                        "Missing or invalid 'path' entry for plugin",
+                    ))?;
+            let path = PathBuf::from_str(&path_str).map_err(de::Error::custom)?;
+            let config = obj
+                .get("config")
+                .map(|c| toml_to_json(c.clone()))
+                .unwrap_or(serde_json::Value::Null);
+            Plugin::new(path, config).map_err(de::Error::custom)
+        })
+        .collect()
+}
+
 fn default_loglevel() -> log::LevelFilter {
     log::LevelFilter::Info
 }
@@ -59,6 +104,10 @@ fn daemon_default() -> bool {
 
 fn listen_default() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 8383))
+}
+
+fn default_plugins() -> Vec<Plugin> {
+    vec![]
 }
 
 /// Everything we need to know for talking to bitcoind serenely
@@ -120,6 +169,8 @@ pub struct Config {
     /// <ip:port> to bind to
     #[serde(default = "listen_default")]
     pub listen: SocketAddr,
+    #[serde(deserialize_with = "deserialize_plugins", default = "default_plugins")]
+    pub plugins: Vec<Plugin>,
 }
 
 #[derive(Debug)]
@@ -197,7 +248,9 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_file_path, Config};
+    use super::{config_file_path, Config, Plugin};
+
+    use std::convert::TryInto;
 
     // Test the format of the configuration file
     #[test]
@@ -286,5 +339,110 @@ mod tests {
         assert!(filepath
             .as_path()
             .ends_with(r#"AppData\Roaming\Miradord\config.toml"#));
+    }
+
+    #[test]
+    fn config_plugins() {
+        // We fail to parse a config with an inexistant path to a plugin. Note how we don't specify
+        // a config here.
+        let toml_str = r#"
+            daemon = false
+            log_level = "trace"
+            data_dir = "/home/wizardsardine/custom/folder/"
+
+            stakeholder_noise_key = "3de4539519b6baca35ad14cd5bac9a4e0875a851632112405bb0547e6fcf16f6"
+
+            coordinator_host = "127.0.0.1:1"
+            coordinator_noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
+
+            [[plugins]]
+            path = "/inexistant/path/123"
+
+            [scripts_config]
+            cpfp_descriptor = "wsh(thresh(1,pk(xpub6BaZSKgpaVvibu2k78QsqeDWXp92xLHZxiu1WoqLB9hKhsBf3miBUDX7PJLgSPvkj66ThVHTqdnbXpeu8crXFmDUd4HeM4s4miQS2xsv3Qb/*)))#cwycq5xu"
+            deposit_descriptor = "wsh(multi(2,xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU/*,xpub6AaffFGfH6WXfm6pwWzmUMuECQnoLeB3agMKaLyEBZ5ZVfwtnS5VJKqXBt8o5ooCWVy2H87GsZshp7DeKE25eWLyd1Ccuh2ZubQUkgpiVux/*))#n3cj9mhy"
+            unvault_descriptor = "wsh(andor(thresh(1,pk(xpub6BaZSKgpaVvibu2k78QsqeDWXp92xLHZxiu1WoqLB9hKhsBf3miBUDX7PJLgSPvkj66ThVHTqdnbXpeu8crXFmDUd4HeM4s4miQS2xsv3Qb/*)),and_v(v:multi(2,03b506a1dbe57b4bf48c95e0c7d417b87dd3b4349d290d2e7e9ba72c912652d80a,0295e7f5d12a2061f1fd2286cefec592dff656a19f55f4f01305d6aa56630880ce),older(4)),thresh(2,pkh(xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU/*),a:pkh(xpub6AaffFGfH6WXfm6pwWzmUMuECQnoLeB3agMKaLyEBZ5ZVfwtnS5VJKqXBt8o5ooCWVy2H87GsZshp7DeKE25eWLyd1Ccuh2ZubQUkgpiVux/*))))#532k8uvf"
+            emergency_address = "bc1q906h8q49vu20cyffqklnzcda20k7c3m83fltey344kz3lctlx9xqhf2v56"
+
+            [bitcoind_config]
+            network = "bitcoin"
+            cookie_path = "/home/user/.bitcoin/.cookie"
+            addr = "127.0.0.1:8332"
+            poll_interval_secs = 18
+        "#;
+        assert!(toml::from_str::<Config>(toml_str)
+            .unwrap_err()
+            .to_string()
+            .contains("Plugin not found at '/inexistant/path/123'"),);
+
+        // We fail to parse a config with a path to a non executable plugin. Note how anything is
+        // accepted as config.
+        let toml_str = r#"
+            daemon = false
+            log_level = "trace"
+            data_dir = "/home/wizardsardine/custom/folder/"
+
+            stakeholder_noise_key = "3de4539519b6baca35ad14cd5bac9a4e0875a851632112405bb0547e6fcf16f6"
+
+            coordinator_host = "127.0.0.1:1"
+            coordinator_noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
+
+            [[plugins]]
+            path = "src/config.rs"
+            config = "dummy"
+
+            [scripts_config]
+            cpfp_descriptor = "wsh(thresh(1,pk(xpub6BaZSKgpaVvibu2k78QsqeDWXp92xLHZxiu1WoqLB9hKhsBf3miBUDX7PJLgSPvkj66ThVHTqdnbXpeu8crXFmDUd4HeM4s4miQS2xsv3Qb/*)))#cwycq5xu"
+            deposit_descriptor = "wsh(multi(2,xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU/*,xpub6AaffFGfH6WXfm6pwWzmUMuECQnoLeB3agMKaLyEBZ5ZVfwtnS5VJKqXBt8o5ooCWVy2H87GsZshp7DeKE25eWLyd1Ccuh2ZubQUkgpiVux/*))#n3cj9mhy"
+            unvault_descriptor = "wsh(andor(thresh(1,pk(xpub6BaZSKgpaVvibu2k78QsqeDWXp92xLHZxiu1WoqLB9hKhsBf3miBUDX7PJLgSPvkj66ThVHTqdnbXpeu8crXFmDUd4HeM4s4miQS2xsv3Qb/*)),and_v(v:multi(2,03b506a1dbe57b4bf48c95e0c7d417b87dd3b4349d290d2e7e9ba72c912652d80a,0295e7f5d12a2061f1fd2286cefec592dff656a19f55f4f01305d6aa56630880ce),older(4)),thresh(2,pkh(xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU/*),a:pkh(xpub6AaffFGfH6WXfm6pwWzmUMuECQnoLeB3agMKaLyEBZ5ZVfwtnS5VJKqXBt8o5ooCWVy2H87GsZshp7DeKE25eWLyd1Ccuh2ZubQUkgpiVux/*))))#532k8uvf"
+            emergency_address = "bc1q906h8q49vu20cyffqklnzcda20k7c3m83fltey344kz3lctlx9xqhf2v56"
+
+            [bitcoind_config]
+            network = "bitcoin"
+            cookie_path = "/home/user/.bitcoin/.cookie"
+            addr = "127.0.0.1:8332"
+            poll_interval_secs = 18
+        "#;
+        assert!(toml::from_str::<Config>(toml_str)
+            .unwrap_err()
+            .to_string()
+            .contains("Plugin 'src/config.rs' is not executable"),);
+
+        // We can put whatever in the config, it'll be stored as JSON
+        let toml_str = r#"
+            daemon = false
+            log_level = "trace"
+            data_dir = "/home/wizardsardine/custom/folder/"
+
+            stakeholder_noise_key = "3de4539519b6baca35ad14cd5bac9a4e0875a851632112405bb0547e6fcf16f6"
+
+            coordinator_host = "127.0.0.1:1"
+            coordinator_noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
+
+            [[plugins]]
+            path = "test_data/dummy_executable"
+            config = { key = 1234, a = "b", o = { "arr" = ["value", "aa"], "f" = 0.001 } }
+
+            [scripts_config]
+            cpfp_descriptor = "wsh(thresh(1,pk(xpub6BaZSKgpaVvibu2k78QsqeDWXp92xLHZxiu1WoqLB9hKhsBf3miBUDX7PJLgSPvkj66ThVHTqdnbXpeu8crXFmDUd4HeM4s4miQS2xsv3Qb/*)))#cwycq5xu"
+            deposit_descriptor = "wsh(multi(2,xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU/*,xpub6AaffFGfH6WXfm6pwWzmUMuECQnoLeB3agMKaLyEBZ5ZVfwtnS5VJKqXBt8o5ooCWVy2H87GsZshp7DeKE25eWLyd1Ccuh2ZubQUkgpiVux/*))#n3cj9mhy"
+            unvault_descriptor = "wsh(andor(thresh(1,pk(xpub6BaZSKgpaVvibu2k78QsqeDWXp92xLHZxiu1WoqLB9hKhsBf3miBUDX7PJLgSPvkj66ThVHTqdnbXpeu8crXFmDUd4HeM4s4miQS2xsv3Qb/*)),and_v(v:multi(2,03b506a1dbe57b4bf48c95e0c7d417b87dd3b4349d290d2e7e9ba72c912652d80a,0295e7f5d12a2061f1fd2286cefec592dff656a19f55f4f01305d6aa56630880ce),older(4)),thresh(2,pkh(xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU/*),a:pkh(xpub6AaffFGfH6WXfm6pwWzmUMuECQnoLeB3agMKaLyEBZ5ZVfwtnS5VJKqXBt8o5ooCWVy2H87GsZshp7DeKE25eWLyd1Ccuh2ZubQUkgpiVux/*))))#532k8uvf"
+            emergency_address = "bc1q906h8q49vu20cyffqklnzcda20k7c3m83fltey344kz3lctlx9xqhf2v56"
+
+            [bitcoind_config]
+            network = "bitcoin"
+            cookie_path = "/home/user/.bitcoin/.cookie"
+            addr = "127.0.0.1:8332"
+            poll_interval_secs = 18
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.plugins,
+            vec![Plugin::new(
+                "test_data/dummy_executable".try_into().unwrap(),
+                serde_json::json!({"key": 1234, "a": "b", "o": {"arr": ["value", "aa"], "f": 0.001}})
+            )
+            .unwrap()]
+        );
     }
 }

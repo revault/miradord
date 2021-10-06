@@ -4,6 +4,7 @@ mod daemonize;
 mod database;
 mod keys;
 mod listener;
+mod plugins;
 mod poller;
 
 use bitcoind::{load_watchonly_wallet, start_bitcoind, wait_bitcoind_synced};
