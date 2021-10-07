@@ -1,3 +1,5 @@
+import os
+
 from fixtures import *
 from test_framework.utils import COIN, DEPOSIT_ADDRESS, DERIV_INDEX, CSV
 
@@ -12,6 +14,10 @@ def test_simple_unvault_broadcast(miradord, bitcoind):
         DEPOSIT_ADDRESS, deposit_value
     )
     bitcoind.generate_block(1, deposit_txid)
+
+    # Make the watchtower revault everything
+    plugin_path = os.path.join(os.path.dirname(__file__), "plugins", "revault_all.py")
+    miradord.add_plugins([{"path": plugin_path}])
 
     # Register this vault on the WT
     txs = miradord.watch_vault(deposit_outpoint, deposit_value * COIN, DERIV_INDEX)
@@ -50,6 +56,10 @@ def test_spent_cancel_detection(miradord, bitcoind):
     )
     bitcoind.generate_block(1, deposit_txid)
 
+    # Make the watchtower revault everything
+    plugin_path = os.path.join(os.path.dirname(__file__), "plugins", "revault_all.py")
+    miradord.add_plugins([{"path": plugin_path}])
+
     # Register this vault on the WT, and make it broadcast the Spend
     txs = miradord.watch_vault(deposit_outpoint, deposit_value * COIN, DERIV_INDEX)
     unvault_txid = bitcoind.rpc.decoderawtransaction(txs["unvault"]["tx"])["txid"]
@@ -80,6 +90,10 @@ def test_undetected_cancel(miradord, bitcoind):
     """Sanity check our behaviour when we don't detect the Cancel for a vault we should
     have Canceled.
     """
+    # Make the watchtower revault everything
+    plugin_path = os.path.join(os.path.dirname(__file__), "plugins", "revault_all.py")
+    miradord.add_plugins([{"path": plugin_path}])
+
     # Register and unvault the first vault
     deposit_value = 12
     deposit_txid, deposit_outpoint = bitcoind.create_utxo(

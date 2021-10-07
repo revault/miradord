@@ -137,6 +137,11 @@ impl Plugin {
         let mut query_ser =
             serde_json::to_vec(&query).expect("No string in map and Serialize won't fail");
         query_ser.push(b'\n');
+        log::trace!(
+            "Sending to plugin '{:?}' request '{}'",
+            self.path.as_path(),
+            String::from_utf8_lossy(&query_ser)
+        );
 
         let mut p = Command::new(&self.path)
             .stdin(Stdio::piped())
@@ -164,6 +169,11 @@ impl Plugin {
                 output.stderr,
             ));
         }
+        log::trace!(
+            "Got from plugin '{:?}' response '{}'",
+            self.path.as_path(),
+            String::from_utf8_lossy(&output.stdout)
+        );
         let resp: NewBlockResponse = serde_json::from_slice(&output.stdout)
             .map_err(|e| PluginError::Deserialization(self.path.clone(), e.to_string()))?;
 
@@ -173,12 +183,12 @@ impl Plugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{NewBlockInfo, NewBlockResponse, Plugin, VaultInfo};
+    use super::{NewBlockInfo, Plugin, VaultInfo};
     use revault_tx::{
         bitcoin::{Amount, OutPoint},
         transactions::UnvaultTransaction,
     };
-    use std::{convert::TryInto, str::FromStr};
+    use std::{convert::TryInto, fs, str::FromStr};
 
     #[test]
     fn plugin_large_request() {
@@ -242,5 +252,49 @@ mod tests {
             plugin.poll(1684527, &new_block).unwrap(),
             vec![deposit_outpoint]
         );
+    }
+
+    #[test]
+    fn plugin_sanitycheck_maxvalueplugin() {
+        let data_dir = "./maxvalueplugin_datadir";
+        let deposit_outpoint = OutPoint::from_str(
+            "5de8acd1a4a81bbfcf1cede5c2721a2c1f0bbd02fc343add24852b885410aa2f:1001",
+        )
+        .unwrap();
+        let unvault_tx = UnvaultTransaction::from_str("cHNidP8BAIkCAAAAAfmN22Yg3hsR6wgkPWJ3tSpO40wY5fgINkSlClxgasy7AAAAAAD9////AkANAwAAAAAAIgAgfPlPYs+3NKdo6gu1ITRhWGaZ77RL/0n3/rfdM0nHDKAwdQAAAAAAACIAIBqfyVGG6ozM3AZyeJhKeLNsjlt7AuXs89eFQSUEgx3xAAAAAAABASuIlAMAAAAAACIAIEpy7LLM5Gsjv384BJqpdhVyxzoC96snQbKN/Pl4yFqSAQjaBABHMEQCIG7ue0n/D+JrDMknOV2Up/NyLh06p2tQTHoEZAAYYoCfAiA0fZxErfzZFgLpSV/f1uvCArcXStNUnhConPYBvEmwcgFHMEQCIALfcLNVtS1zZ/AH/5JGVPlUyNGB4tAWOAvJm5DFCFkPAiAxw8oPariZ4OqNZH/PiSQytLInnsYMmzY8khNtDWS7WQFHUiED2l1MSok0kn+im8fepkDk9JJ4kmz7S7PJbLp2MHUScDshAqg1gjG67ft3qNh1U2hWCYumJvmnWsb96aAQU3BKIwiOUq4AIgICCu8X76xDyD8Eurt1XmKvjamdwezV7UxLGsoa8yfMj2cI/w6LrAoAAAAiAgKoNYIxuu37d6jYdVNoVgmLpib5p1rG/emgEFNwSiMIjgjAoMvqCgAAACICAulOlir/rBPSuqc9Z7mGFUE1ekHvzGRuDA2sjFgPGzZ+CDooLAQKAAAAIgIDncUagEr+XYCSpDykd7a6WrIa1q58GBTGSMVms8Dk/1YI0jxctQoAAAAiAgPaXUxKiTSSf6Kbx96mQOT0kniSbPtLs8lsunYwdRJwOwhMrobwCgAAAAAiAgOdxRqASv5dgJKkPKR3trpashrWrnwYFMZIxWazwOT/VgjSPFy1CgAAAAA=").unwrap();
+        let vault_info = VaultInfo {
+            value: Amount::from_sat(567890),
+            deposit_outpoint,
+            unvault_tx: unvault_tx.clone(),
+        };
+        let new_block = NewBlockInfo {
+            new_attempts: vec![vault_info],
+            successful_attempts: vec![],
+            revaulted_attempts: vec![],
+        };
+
+        // max_value is vault value -1, it tells to revault
+        let config = serde_json::json!({
+            "max_value": 567889,
+            "data_dir": data_dir,
+        });
+        let plugin = Plugin::new(
+            "tests/plugins/max_value_in_flight.py".try_into().unwrap(),
+            config,
+        )
+        .unwrap();
+        assert_eq!(plugin.poll(1, &new_block).unwrap(), vec![deposit_outpoint]);
+        // max_value is vault value, it does not
+        let config = serde_json::json!({
+            "max_value": 567890,
+            "data_dir": data_dir,
+        });
+        let plugin = Plugin::new(
+            "tests/plugins/max_value_in_flight.py".try_into().unwrap(),
+            config,
+        )
+        .unwrap();
+        assert_eq!(plugin.poll(1, &new_block).unwrap(), vec![]);
+        fs::remove_dir_all(data_dir).unwrap();
     }
 }

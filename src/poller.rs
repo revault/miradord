@@ -7,8 +7,9 @@ use crate::{
     database::{
         db_cancel_signatures, db_canceling_vaults, db_del_vault, db_delegated_vaults, db_instance,
         db_revoc_confirmed, db_should_cancel_vault, db_should_not_cancel_vault, db_update_tip,
-        schema::DbVault, DatabaseError,
+        db_vault, schema::DbVault, DatabaseError,
     },
+    plugins::{NewBlockInfo, VaultInfo},
 };
 use revault_tx::{
     bitcoin::{consensus::encode, secp256k1},
@@ -224,7 +225,7 @@ fn revault(
     db_path: &path::Path,
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
     bitcoind: &BitcoinD,
-    db_vault: DbVault,
+    db_vault: &DbVault,
     unvault_txin: UnvaultTxIn,
     deposit_desc: &DerivedDepositDescriptor,
 ) -> Result<(), PollerError> {
@@ -281,19 +282,17 @@ fn revault(
     Ok(())
 }
 
-// TODO: actually implement the interface to plugins for taking the decision to Revault
-fn should_revault(_unvault_tx: &UnvaultTransaction) -> bool {
-    true
-}
-
+// Poll bitcoind for new Unvault UTxO of delegated vaults we are watching. Return info about each
+// new Unvault attempt.
 fn check_for_unvault(
     db_path: &path::Path,
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
     config: &Config,
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
-) -> Result<(), PollerError> {
+) -> Result<NewBlockInfo, PollerError> {
     let deleg_vaults = db_delegated_vaults(db_path)?;
+    let mut new_attempts = vec![];
 
     for db_vault in deleg_vaults {
         let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &db_vault);
@@ -323,19 +322,82 @@ fn check_for_unvault(
                 utxoinfo
             );
 
-            if should_revault(&unvault_tx) {
-                db_should_cancel_vault(db_path, db_vault.id, unvault_height)?;
-                revault(
-                    db_path,
-                    secp,
-                    bitcoind,
-                    db_vault,
-                    unvault_txin,
-                    &deposit_desc,
-                )?;
-            } else {
-                db_should_not_cancel_vault(db_path, db_vault.id, unvault_height)?;
-            }
+            // If needed to be canceled it will be marked as such when plugins tell us so.
+            db_should_not_cancel_vault(db_path, db_vault.id, unvault_height)?;
+            let vault_info = VaultInfo {
+                value: db_vault.amount,
+                deposit_outpoint: db_vault.deposit_outpoint,
+                unvault_tx,
+            };
+            new_attempts.push(vault_info);
+        }
+    }
+
+    Ok(NewBlockInfo {
+        new_attempts,
+        // TODO: record and share canceled and spent attempts
+        successful_attempts: vec![],
+        revaulted_attempts: vec![],
+    })
+}
+
+// Poll each of our plugins for vaults to be revaulted given the updates to our vaults' state
+// (which might be an empty set) in the latest block.
+fn maybe_revault(
+    db_path: &path::Path,
+    secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
+    config: &Config,
+    bitcoind: &BitcoinD,
+    block_height: i32,
+    block_info: &NewBlockInfo,
+) -> Result<(), PollerError> {
+    let outpoints_to_revault = config
+        .plugins
+        .iter()
+        .fold(vec![], |mut to_revault, plugin| {
+            match plugin.poll(block_height, block_info) {
+                Ok(mut res) => to_revault.append(&mut res),
+                Err(e) => {
+                    // FIXME: should we crash instead?
+                    log::error!("Error when polling plugin: '{}'", e);
+                }
+            };
+            to_revault
+        });
+
+    for deposit_outpoint in outpoints_to_revault {
+        if let Some(db_vault) = db_vault(db_path, &deposit_outpoint)? {
+            let unvault_height = match db_vault.unvault_height {
+                Some(h) => h,
+                None => {
+                    // FIXME: should we crash? This must never happen.
+                    log::error!("One of the plugins told us to revault a non-unvaulted vault");
+                    continue;
+                }
+            };
+            let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &db_vault);
+            let unvault_tx = match unvault_tx(&db_vault, &deposit_desc, &unvault_desc, &cpfp_desc) {
+                Ok(tx) => tx,
+                Err(e) => {
+                    // TODO: handle dust better (they should never send us dust vaults though)
+                    log::error!("Unexpected error deriving Unvault transaction: '{}'", e);
+                    continue;
+                }
+            };
+            let unvault_txin = unvault_tx.revault_unvault_txin(&unvault_desc);
+
+            db_should_cancel_vault(db_path, db_vault.id, unvault_height)?;
+            revault(
+                db_path,
+                secp,
+                bitcoind,
+                &db_vault,
+                unvault_txin,
+                &deposit_desc,
+            )?;
+        } else {
+            // FIXME: should we crash? This must never happen.
+            log::error!("One of the plugins returned an inexistant outpoint.");
         }
     }
 
@@ -353,25 +415,36 @@ fn new_block(
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
 ) -> Result<(), PollerError> {
-    // 1. Update the fee-bumping reserves estimates
+    // Update the fee-bumping reserves estimates
     // TODO
 
-    // 2. Any vault to forget and feebump coins to unregister?
+    // Any vault to forget and feebump coins to unregister?
     // TODO
 
-    // 3. Any Unvault txo confirmed?
-    check_for_unvault(db_path, secp, config, bitcoind, current_tip)?;
+    // Any Unvault txo confirmed?
+    let new_blk_info = check_for_unvault(db_path, secp, config, bitcoind, current_tip)?;
 
-    // 4. Any Cancel tx still unconfirmed? Any to forget about?
+    // Any vault plugins tell us to revault?
+    maybe_revault(
+        db_path,
+        secp,
+        config,
+        bitcoind,
+        current_tip.height,
+        &new_blk_info,
+    )?;
+
+    // TODO: manage the non to-cancel too!
+    // Any Cancel tx still unconfirmed? Any to forget about?
     manage_cancel_attempts(db_path, secp, config, bitcoind, current_tip)?;
 
-    // 5. Any coin received on the FB wallet?
+    // Any coin received on the FB wallet?
     // TODO
 
-    // 6. Any FB coin to be registered for consolidation?
+    // Any FB coin to be registered for consolidation?
     // TODO
 
-    // 7. Any consolidation to be processed given the current fee market?
+    // Any consolidation to be processed given the current fee market?
     // TODO
 
     Ok(())
