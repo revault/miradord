@@ -355,9 +355,6 @@ mod tests {
             coordinator_host = "127.0.0.1:1"
             coordinator_noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
 
-            [[plugins]]
-            path = "/inexistant/path/123"
-
             [scripts_config]
             cpfp_descriptor = "wsh(thresh(1,pk(xpub6BaZSKgpaVvibu2k78QsqeDWXp92xLHZxiu1WoqLB9hKhsBf3miBUDX7PJLgSPvkj66ThVHTqdnbXpeu8crXFmDUd4HeM4s4miQS2xsv3Qb/*)))#cwycq5xu"
             deposit_descriptor = "wsh(multi(2,xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU/*,xpub6AaffFGfH6WXfm6pwWzmUMuECQnoLeB3agMKaLyEBZ5ZVfwtnS5VJKqXBt8o5ooCWVy2H87GsZshp7DeKE25eWLyd1Ccuh2ZubQUkgpiVux/*))#n3cj9mhy"
@@ -369,6 +366,9 @@ mod tests {
             cookie_path = "/home/user/.bitcoin/.cookie"
             addr = "127.0.0.1:8332"
             poll_interval_secs = 18
+
+            [[plugins]]
+            path = "/inexistant/path/123"
         "#;
         assert!(toml::from_str::<Config>(toml_str)
             .unwrap_err()
@@ -419,10 +419,6 @@ mod tests {
             coordinator_host = "127.0.0.1:1"
             coordinator_noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
 
-            [[plugins]]
-            path = "test_data/dummy_executable"
-            config = { key = 1234, a = "b", o = { "arr" = ["value", "aa"], "f" = 0.001 } }
-
             [scripts_config]
             cpfp_descriptor = "wsh(thresh(1,pk(xpub6BaZSKgpaVvibu2k78QsqeDWXp92xLHZxiu1WoqLB9hKhsBf3miBUDX7PJLgSPvkj66ThVHTqdnbXpeu8crXFmDUd4HeM4s4miQS2xsv3Qb/*)))#cwycq5xu"
             deposit_descriptor = "wsh(multi(2,xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU/*,xpub6AaffFGfH6WXfm6pwWzmUMuECQnoLeB3agMKaLyEBZ5ZVfwtnS5VJKqXBt8o5ooCWVy2H87GsZshp7DeKE25eWLyd1Ccuh2ZubQUkgpiVux/*))#n3cj9mhy"
@@ -434,6 +430,10 @@ mod tests {
             cookie_path = "/home/user/.bitcoin/.cookie"
             addr = "127.0.0.1:8332"
             poll_interval_secs = 18
+
+            [[plugins]]
+            path = "test_data/dummy_executable"
+            config = { key = 1234, a = "b", o = { "arr" = ["value", "aa"], "f" = 0.001 } }
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(

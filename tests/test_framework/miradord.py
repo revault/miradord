@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import socket
+import toml
 
 from test_framework.utils import (
     TailableProc,
@@ -36,6 +37,7 @@ class Miradord(TailableProc):
         coordinator_noise_key,
         coordinator_port,
         bitcoind,
+        plugins=[],
     ):
         TailableProc.__init__(self, datadir, verbose=VERBOSE)
 
@@ -95,6 +97,8 @@ class Miradord(TailableProc):
             f.write(f"addr = '127.0.0.1:{bitcoind.rpcport}'\n")
             f.write("poll_interval_secs = 5\n")
 
+            f.write(f"\n{toml.dumps({'plugins': plugins})}\n")
+
     def start(self):
         TailableProc.start(self)
         self.wait_for_logs(
@@ -109,6 +113,17 @@ class Miradord(TailableProc):
             self.stop()
         except Exception:
             self.proc.kill()
+
+    def add_plugins(self, plugins):
+        """Takes a list of dict representing plugin config to add to the watchtower and
+        restarts it."""
+        self.stop()
+        conf = toml.loads(open(self.conf_file, "r").read())
+        if "plugins" not in conf:
+            conf["plugins"] = []
+        conf["plugins"] += plugins
+        open(self.conf_file, "w").write(toml.dumps(conf))
+        self.start()
 
     def get_signed_txs(self, deposit_outpoint, deposit_value, deriv_index=DERIV_INDEX):
         """
