@@ -380,6 +380,22 @@ fn maybe_revault(
     Ok(())
 }
 
+fn update_feerate_estimates(
+    db_path: &path::Path,
+    bitcoind: &BitcoinD,
+    current_tip: &ChainTip,
+) -> Result<(), PollerError> {
+    let conf_target = 1;
+    if let Some(feerate) = bitcoind.feerate_estimate(conf_target) {
+        log::debug!(
+            "At block {} feerate estimate is {:?}",
+            current_tip.height,
+            feerate.feerate
+        )
+    }
+    Ok(())
+}
+
 // We only do actual processing on new blocks. This puts a natural limit on the amount of work
 // we are doing, reduces the number of edge cases we need to handle, and there is no benefit to try
 // to cancel Unvaults right after their broadcast.
@@ -393,6 +409,7 @@ fn new_block(
 ) -> Result<(), PollerError> {
     // Update the fee-bumping reserves estimates
     // TODO
+    update_feerate_estimates(db_path, bitcoind, current_tip)?;
 
     // Any vault to forget and feebump coins to unregister?
     // TODO

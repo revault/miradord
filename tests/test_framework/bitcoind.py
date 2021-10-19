@@ -132,6 +132,9 @@ class Bitcoind(TailableProc):
         for txid in txids:
             self.rpc.prioritisetransaction(txid, None, fee_delta)
 
+    def estimatesmartfee(self, conf_target):
+        return self.rpc.estimatesmartfee(conf_target)
+
     def simple_reorg(self, height, shift=0):
         """
         Reorganize chain by creating a fork at height={height} and:

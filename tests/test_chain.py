@@ -32,7 +32,8 @@ def test_simple_unvault_broadcast(miradord, bitcoind):
         [
             f"Got a confirmed Unvault UTXO at '{unvault_txid}:0'",
             f"Broadcasted Cancel transaction '{txs['cancel']['tx']}'",
-            f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is still unspent",
+            f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is"
+            " still unspent",
         ]
     )
 
@@ -70,7 +71,8 @@ def test_spent_cancel_detection(miradord, bitcoind):
         [
             f"Got a confirmed Unvault UTXO at '{unvault_txid}:0'",
             f"Broadcasted Cancel transaction '{txs['cancel']['tx']}'",
-            f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is still unspent",
+            f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is"
+            " still unspent",
         ]
     )
 
@@ -82,7 +84,8 @@ def test_spent_cancel_detection(miradord, bitcoind):
 
     bitcoind.generate_block(1, wait_for_mempool=[cancel_tx["txid"], unvault_txid])
     miradord.wait_for_log(
-        f"Noticed at height .* that Cancel transaction was confirmed for vault at '{deposit_outpoint}'"
+        "Noticed at height .* that Cancel transaction was confirmed for vault at"
+        f" '{deposit_outpoint}'"
     )
 
 
@@ -119,9 +122,24 @@ def test_simple_spend_detection(miradord, bitcoind):
     bitcoind.rpc.sendrawtransaction(txs["spend"]["tx"])
     bitcoind.generate_block(1, 1)
     miradord.wait_for_log(
-        f"Noticed .* that Spend transaction was confirmed for vault at '{deposit_outpoint}'"
+        "Noticed .* that Spend transaction was confirmed for vault at"
+        f" '{deposit_outpoint}'"
     )
 
     # Generate two days worth of blocks, the WT should forget about this vault
     bitcoind.generate_block(288)
     miradord.wait_for_log(f"Forgetting about consumed vault at '{deposit_outpoint}'")
+
+
+def test_feerate_estimation(miradord, bitcoind):
+    # Generate some transaction history for estimatesmartfee.
+    # 10 transactions in 50 blocks (send to deposit address)
+    amount = 1
+    for block in range(0, 50):
+        wait_for_mempool = []
+        for tx in range(0, 10):
+            txid, outpoint = bitcoind.create_utxo(DEPOSIT_ADDRESS, amount)
+            wait_for_mempool.append(txid)
+        bitcoind.generate_block(1, wait_for_mempool)
+    feerate = bitcoind.estimatesmartfee(1)["feerate"].normalize()
+    miradord.wait_for_logs([f"feerate estimate is {feerate}"])

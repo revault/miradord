@@ -425,6 +425,27 @@ impl BitcoinD {
         self.make_node_request_failible("sendrawtransaction", &params!(tx_hex))
             .map(|_| ())
     }
+
+    /// Get fee-rate estimate
+    /// TODO: limit conf_target to range 1 to 1008
+    pub fn feerate_estimate(&self, conf_target: i16) -> Option<FeeRate> {
+        let result = self.make_node_request("estimatesmartfee", &params!(conf_target));
+
+        if let Some(_) = result.get("errors") {
+            None
+        } else {
+            let feerate = result
+                .get("feerate")
+                .and_then(|f| f.as_f64())
+                .expect("'estimatesmartfee' didn't return a 'feerate' entry");
+            let blocks = result
+                .get("blocks")
+                .and_then(|n| n.as_i64())
+                .expect("'estimatesmartfee' didn't return a 'blocks' entry");
+
+            Some(FeeRate { feerate, blocks })
+        }
+    }
 }
 
 /// Info about bitcoind's sync state
@@ -447,4 +468,10 @@ pub struct UtxoInfo {
     pub confirmations: i64,
     pub bestblock: BlockHash,
     pub value: Amount,
+}
+
+/// FeeRate information from estimatesmartfee
+pub struct FeeRate {
+    pub feerate: f64,
+    pub blocks: i64,
 }
