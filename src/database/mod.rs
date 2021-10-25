@@ -1,7 +1,7 @@
 pub mod schema;
 
 use revault_tx::{
-    bitcoin::{secp256k1, util::bip32, Amount, Network, OutPoint},
+    bitcoin::{secp256k1, util::bip32, Amount, BlockHash, Network, OutPoint},
     scripts::{CpfpDescriptor, DepositDescriptor, UnvaultDescriptor},
 };
 use schema::{DbInstance, DbSignature, DbVault, SigTxType, SCHEMA};
@@ -132,6 +132,23 @@ pub fn db_instance(db_path: &path::Path) -> Result<DbInstance, DatabaseError> {
         db_query(db_path, "SELECT * FROM instances", [], |row| row.try_into())?;
 
     Ok(rows.pop().expect("No row in instances table?"))
+}
+
+/// Set the new current block chain tip
+pub fn db_update_tip(
+    db_path: &path::Path,
+    height: i32,
+    hash: BlockHash,
+) -> Result<(), DatabaseError> {
+    let instance_id = db_instance(db_path)?.id;
+
+    db_exec(db_path, |db_tx| {
+        db_tx.execute(
+            "UPDATE instances SET tip_blockheight = (?1), tip_blockhash = (?2) WHERE id = (?3)",
+            params![height, hash.to_vec(), instance_id],
+        )?;
+        Ok(())
+    })
 }
 
 /// Register a new vault to be watched. Atomically inserts the vault and the Emergency signatures.
@@ -937,6 +954,32 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(db_cancel_signatures(&db_path, 2).unwrap().is_empty());
+
+        // Cleanup
+        fs::remove_file(&db_path).unwrap();
+    }
+
+    #[test]
+    fn db_tip_update() {
+        let db_path = get_db();
+
+        let height = 21;
+        let hash =
+            BlockHash::from_str("000000000000000000018dc30378a7d580c45ae3de35e046a16fec8c357a0e81")
+                .unwrap();
+        db_update_tip(&db_path, height, hash).unwrap();
+        let instance = db_instance(&db_path).unwrap();
+        assert_eq!(instance.tip_blockheight, height);
+        assert_eq!(instance.tip_blockhash, hash);
+
+        let height = 22;
+        let hash =
+            BlockHash::from_str("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")
+                .unwrap();
+        db_update_tip(&db_path, height, hash).unwrap();
+        let instance = db_instance(&db_path).unwrap();
+        assert_eq!(instance.tip_blockheight, height);
+        assert_eq!(instance.tip_blockhash, hash);
 
         // Cleanup
         fs::remove_file(&db_path).unwrap();

@@ -6,8 +6,8 @@ use crate::{
     config::Config,
     database::{
         db_cancel_signatures, db_canceling_vaults, db_del_vault, db_delegated_vaults, db_instance,
-        db_revoc_confirmed, db_should_cancel_vault, db_should_not_cancel_vault, schema::DbVault,
-        DatabaseError,
+        db_revoc_confirmed, db_should_cancel_vault, db_should_not_cancel_vault, db_update_tip,
+        schema::DbVault, DatabaseError,
     },
 };
 use revault_tx::{
@@ -392,7 +392,7 @@ pub fn main_loop(
             }
 
             new_block(db_path, secp, config, bitcoind, &bitcoind_tip)?;
-            // TODO: update tip in db
+            db_update_tip(db_path, bitcoind_tip.height, bitcoind_tip.hash)?;
         } else if bitcoind_tip.hash != db_instance.tip_blockhash {
             panic!("No reorg handling yet");
         }
