@@ -5,12 +5,12 @@ from test_framework.miradord import Miradord
 from test_framework.utils import (
     get_descriptors,
     EXECUTOR_WORKERS,
-    STKS_XPRIVS,
     STKS_XPUBS,
+    MANS_XPUBS,
+    COSIG_PUBKEYS,
+    CSV,
 )
 
-import bip32
-import logging
 import os
 import pytest
 import shutil
@@ -120,22 +120,11 @@ def miradord(bitcoind, directory):
     datadir = os.path.join(directory, "miradord")
     os.makedirs(datadir, exist_ok=True)
 
-    # We only care about the stakeholders, so we use dummy keys for the others.
     cpfp_xpubs = [
         "xpub6FD2XRGE3DAJzb69LXMEAiHfj3U4xVqLExMSV4DJXs5zCntHmtdvpkErLwAMGMnKJN2m3LGgaaAMvBELwNNJDAwWvidNMxVgSqLyoC2y2Kc"
     ]
-    cosigs_keys = [
-        "03170fcc522ee69d743c15e40379fcabb6c607ff3dbeb68cbdd6da5da9c9d048a5",
-        "03b8789ff36bf55a77a20af0a0b1668d8dd3df2e7b7f81da058b5236f0120aba38",
-        "028d5f3bb2bcf819f785086e0b04833361f773a328aeff41ea5dd248fe03d18b25",
-        "03c977891e952393a742f9f2ef5cd4cefb7cbe58d9b3acfdc750b38f6931764ba8",
-    ]
-    mans_xpubs = [
-        "xpub6CFH8m3bnUFXvS78XZyCQ9mCbp7XmKXbS67YHGUS3NxHSLhAMCGHGaEPojcoYt5PYnocyuScAM5xuDzf4BqFQt3fhmKEaRgmVzDcAR46Byh",
-        "xpub6ECZqYNQzHkveSWmsGh6XSL8wMGXRtoZ5hkbWXwRSVEyEsKADe34dbdnMob1ZjUpd4TD7no1isnnvpQq9DchFes5DnHJ7JupSntZsKr7VbQ",
-    ]
     (dep_desc, unv_desc, cpfp_desc) = get_descriptors(
-        STKS_XPUBS, cosigs_keys, mans_xpubs, len(mans_xpubs), cpfp_xpubs, 232
+        STKS_XPUBS, COSIG_PUBKEYS, MANS_XPUBS, len(MANS_XPUBS), cpfp_xpubs, CSV
     )
     emer_addr = "bcrt1qewc2348370pgw8kjz8gy09z8xyh0d9fxde6nzamd3txc9gkmjqmq8m4cdq"
 

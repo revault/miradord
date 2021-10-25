@@ -252,11 +252,15 @@ pub fn db_store_unemer_sigs(
 }
 
 /// Mark a vault as needing to be canceled
-pub fn db_should_cancel_vault(db_path: &path::Path, vault_id: i64) -> Result<(), DatabaseError> {
+pub fn db_should_cancel_vault(
+    db_path: &path::Path,
+    vault_id: i64,
+    unvault_height: i32,
+) -> Result<(), DatabaseError> {
     db_exec(&db_path, |db_tx| {
         db_tx.execute(
-            "UPDATE vaults SET should_cancel = 1 WHERE id = (?1)",
-            params![vault_id],
+            "UPDATE vaults SET should_cancel = 1, unvault_height = (?1) WHERE id = (?2)",
+            params![unvault_height, vault_id],
         )?;
 
         Ok(())
@@ -267,11 +271,12 @@ pub fn db_should_cancel_vault(db_path: &path::Path, vault_id: i64) -> Result<(),
 pub fn db_should_not_cancel_vault(
     db_path: &path::Path,
     vault_id: i64,
+    unvault_height: i32,
 ) -> Result<(), DatabaseError> {
     db_exec(&db_path, |db_tx| {
         db_tx.execute(
-            "UPDATE vaults SET should_cancel = 0 WHERE id = (?1)",
-            params![vault_id],
+            "UPDATE vaults SET should_cancel = 0, unvault_height = (?1) WHERE id = (?2)",
+            params![unvault_height, vault_id],
         )?;
 
         Ok(())
@@ -726,6 +731,7 @@ mod tests {
                 amount: amount_a,
                 delegated: false,
                 should_cancel: None,
+                unvault_height: None,
                 revoc_height: None,
             }
         );
@@ -744,6 +750,7 @@ mod tests {
                 amount: amount_b,
                 delegated: false,
                 should_cancel: None,
+                unvault_height: None,
                 revoc_height: None,
             }
         );
@@ -796,6 +803,7 @@ mod tests {
                 amount: amount_a,
                 delegated: true,
                 should_cancel: None,
+                unvault_height: None,
                 revoc_height: None,
             }
         );
@@ -810,6 +818,7 @@ mod tests {
                 amount: amount_b,
                 delegated: true,
                 should_cancel: None,
+                unvault_height: None,
                 revoc_height: None,
             }
         );
@@ -858,7 +867,7 @@ mod tests {
 
         // And if we mark them as either 'to cancel' or 'to let go through', they won't be
         // returned by db_delegated_vaults
-        db_should_cancel_vault(&db_path, 1).unwrap();
+        db_should_cancel_vault(&db_path, 1, 10142091).unwrap();
         assert_eq!(
             db_delegated_vaults(&db_path).unwrap(),
             vec![DbVault {
@@ -869,10 +878,11 @@ mod tests {
                 amount: amount_b,
                 delegated: true,
                 should_cancel: None,
+                unvault_height: None,
                 revoc_height: None,
             }]
         );
-        db_should_not_cancel_vault(&db_path, 2).unwrap();
+        db_should_not_cancel_vault(&db_path, 2, 10142088).unwrap();
         assert_eq!(db_delegated_vaults(&db_path).unwrap(), vec![]);
 
         // We marked the first one as needing to be canceled, but not the second one.
@@ -886,6 +896,7 @@ mod tests {
                 amount: amount_a,
                 delegated: true,
                 should_cancel: Some(true),
+                unvault_height: Some(10142091),
                 revoc_height: None,
             }]
         );
@@ -902,6 +913,7 @@ mod tests {
                 amount: amount_a,
                 delegated: true,
                 should_cancel: Some(true),
+                unvault_height: Some(10142091),
                 revoc_height: Some(10142101),
             }
         );

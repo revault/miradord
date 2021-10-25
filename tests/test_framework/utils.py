@@ -21,6 +21,8 @@ assert LOG_LEVEL in ["trace", "debug", "info", "warn", "error"]
 
 COIN = 10 ** 8
 
+CSV = 72
+
 # FIXME: This is a hack until we have a python-revault-tx. We use static xprivs
 # and a static deposit address across all tests
 STKS_XPRIVS = [
@@ -34,6 +36,27 @@ STKS_XPUBS = [
     "xpub6E1ravsEQUCr5cJNiPAvPvVeRH1RkRGmjpHfs7N2KzxncmfQauupVzmeUxzZ4osSfJc2SC9fMcn1aAPEc1b89nhdvVjeLtQgCQHdnJ4ND42",
     "xpub6ExD1XvhwhJm18TJ941dFJCpBKaYrUv2CKbN72u2DD4CaqcY2PMLZTm4iBvV8LMnNDnxjsC8Pk7chXMEw9ejesmZNX4dJsW7vbDBcASxNX7",
     "xpub6E1dNatd88HBA9Zv7hvqEbCKG3pvi47yxq94DN6H2ze6NoFMSAiS7qqX4CUfDHrt6UsEHah8UPp1Bw2q9p2pcZHNvQxMiaoeErGUTKBmj4P",
+]
+MANS_XPRIVS = [
+    "xprv9wHokC2KXdTSszgTSY5gv5UfS94Bc9AdyL1BB5aYN8utyoUTFhUZw5JwojEDAG8RDQwCRMhUoymeGKj2wM7CsSZEj1ucbXpojQcWt8kEvKa",
+    "xprv9xBSDGRCEcijj5maNFNamzcjkF6uwt7KFKdnGGktxfN4zE3atv8jbX7pdLuR1b4NRhJtUyNVA2niGAofXenAhpXrDyaSdBA6gm6wJvWPVTi",
+]
+MANS_XPUBS = [
+    "xpub6AHA9hZDN11k6UkvYZchHDRPzAtg1btVLYvmyTz9vUSsrboboEnpUsdRezyNomhRwNicTud2wRGe1FJjCtMK5zZ1TDANE8Mm2BYkjdTVhmR",
+    "xpub6BAncmx64zH2wZr3UGub98ZUJGwQMLqAcYZP4fAWWzu3s2NjSTSz9KSJUcYKudaDavLjRgsVrMVBKvDRERbrFyjcv5Esk3uVFgeWjhMXKAs",
+]
+# FIXME: make cosigs fucking opt-in :sob:
+COSIG_PRIVKEYS = [
+    "3369df522f601c8f81f5e69f68c991399dcc067b3ef9324abe749d3e32cfd1da",
+    "340e40c25ec68e7b7d13d703cd04a472f60307aeca724790159ae4a6948a35e7",
+    "a02ef51da78e20fd4f56a0350faac9747cc19e7d57f24679858ffd846c6a77a7",
+    "e51a21fa2d6d3e1d0808d0b820b1973d973f8f01b0514d76329dd7865fb82752",
+]
+COSIG_PUBKEYS = [
+    "02f844e875157e07c9d7f2cd7af622bd8db17b2587eb4360596705f4d9f052b0e6",
+    "025f1ef18b26f353fb662617a4e2bc67d188e21687a893f3fff9ee8a33b490a1ba",
+    "02906bb8b9ef1b6d5f3497069856c74916afb156dab8c6e36362d048f8ecfca08a",
+    "02d84768bc18dd85b1897788885259bd85c913d94783920fdd8f748269ea802010",
 ]
 DERIV_INDEX = 7651
 DEPOSIT_ADDRESS = "bcrt1qgprmrfkz5mucga0ec046v0sf8yg2y4za99c0h26ew5ycfx64sgdsl0u2j3"
@@ -106,6 +129,8 @@ def get_descriptors(stks_xpubs, cosigs_keys, mans_xpubs, mans_thresh, cpfp_xpubs
 # FIXME: have a python-revault-tx lib to avoid this hack..
 def get_signed_txs(
     stks_xprivs,
+    mans_xprivs,
+    cosig_privkeys,
     deposit_desc,
     unvault_desc,
     cpfp_desc,
@@ -118,6 +143,7 @@ def get_signed_txs(
     Get the Unvault, Cancel, Emergency and Unvault Emergency fully signed
     transactions extracted, ready to be broadcast.
     """
+    # FIXME: use `cargo`'s '--manifest-path' option instead
     # tests/test_framework/../../contrib/tools/txbuilder/target/debug/txbuilder
     txbuilder_dir = os.path.abspath(
         os.path.join(
@@ -141,6 +167,8 @@ def get_signed_txs(
     cmd = [
         txbuilder_bin,
         f"{json.dumps(stks_xprivs)}",
+        f"{json.dumps(mans_xprivs)}",
+        f"{json.dumps(cosig_privkeys)}",
         f"{str(deposit_desc)}",
         f"{str(unvault_desc)}",
         f"{str(cpfp_desc)}",
