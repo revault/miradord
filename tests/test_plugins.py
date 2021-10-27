@@ -57,12 +57,12 @@ def test_max_value_in_flight(miradord, bitcoind):
         [
             f"Got a confirmed Unvault UTXO at '{unvault_txid}:0'",
             f"Broadcasted Cancel transaction '{txs['cancel']['tx']}'",
-            f"Cancel transaction '{cancel_txid}' for vault at '{deposit_outpoint}' is still unconfirmed",
+            f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is still unspent",
         ]
     )
     bitcoind.generate_block(1, wait_for_mempool=cancel_txid)
     miradord.wait_for_log(
-        f"Vault at '{deposit_outpoint}' Cancel transaction .* confirmed"
+        f"Cancel transaction was confirmed for vault at '{deposit_outpoint}'"
     )
 
 
@@ -115,10 +115,10 @@ def test_multiple_plugins(miradord, bitcoind):
         [
             f"Got a confirmed Unvault UTXO at '{unvault_txid}:0'",
             f"Broadcasted Cancel transaction '{txs['cancel']['tx']}'",
-            f"Cancel transaction '{cancel_txid}' for vault at '{deposit_outpoint}' is still unconfirmed",
+            f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is still unspent",
         ]
     )
     bitcoind.generate_block(1, wait_for_mempool=cancel_txid)
     miradord.wait_for_log(
-        f"Vault at '{deposit_outpoint}' Cancel transaction .* confirmed"
+        f"Cancel transaction was confirmed for vault at '{deposit_outpoint}'"
     )

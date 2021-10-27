@@ -5,9 +5,9 @@ use crate::{
     },
     config::Config,
     database::{
-        db_cancel_signatures, db_canceling_vaults, db_del_vault, db_delegated_vaults, db_instance,
-        db_revoc_confirmed, db_should_cancel_vault, db_should_not_cancel_vault, db_update_tip,
-        db_vault, schema::DbVault, DatabaseError,
+        db_cancel_signatures, db_del_vault, db_delegated_vaults, db_instance,
+        db_should_cancel_vault, db_should_not_cancel_vault, db_unvault_spender_confirmed,
+        db_unvaulted_vaults, db_update_tip, db_vault, schema::DbVault, DatabaseError,
     },
     plugins::{NewBlockInfo, VaultInfo},
 };
@@ -95,16 +95,16 @@ fn unvault_tx(
     )
 }
 
-fn manage_cancel_attempts(
+fn manage_unvaulted_vaults(
     db_path: &path::Path,
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
     config: &Config,
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
 ) -> Result<(), PollerError> {
-    let canceling_vaults = db_canceling_vaults(db_path)?;
+    let unvaulted_vaults = db_unvaulted_vaults(db_path)?;
 
-    for db_vault in canceling_vaults {
+    for db_vault in unvaulted_vaults {
         let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &db_vault);
         let unvault_tx = match unvault_tx(&db_vault, &deposit_desc, &unvault_desc, &cpfp_desc) {
             Ok(tx) => tx,
@@ -116,17 +116,25 @@ fn manage_cancel_attempts(
         };
         let unvault_txin = unvault_tx.revault_unvault_txin(&unvault_desc);
         let unvault_outpoint = unvault_txin.outpoint();
-        let cancel_tx = CancelTransaction::new(
-            unvault_txin,
-            None,
-            &deposit_desc,
-            /* FIXME: remove from the API */ 0,
-        )
-        .expect("Can only fail if we have an insane feebump input");
 
-        // If it was confirmed, check for how long and maybe forget it. Otherwise check if it got
-        // confirmed since our last poll.
-        if let Some(conf_height) = db_vault.revoc_height {
+        // Don't do anything if the Unvault is still unspent. TODO: re-bumping
+        if bitcoind.utxoinfo(&unvault_outpoint).is_some() {
+            if bitcoind.chain_tip().hash != current_tip.hash {
+                // TODO
+            }
+            log::debug!(
+                "Unvault transaction '{}' for vault at '{}' is still unspent at height '{}'",
+                unvault_outpoint.txid,
+                &db_vault.deposit_outpoint,
+                current_tip.height
+            );
+            continue;
+        }
+
+        // If the spending tx was previously confirmed, check for how long it has been and
+        // maybe forget about this vault.
+        // NOTE: plugins would already have been notified.
+        if let Some(conf_height) = db_vault.spent_height {
             let n_confs = current_tip
                 .height
                 .checked_add(1)
@@ -136,93 +144,43 @@ fn manage_cancel_attempts(
             if n_confs > REORG_WATCH_LIMIT {
                 db_del_vault(db_path, db_vault.id)?;
                 log::info!(
-                    "Forgetting about consumed vault at '{}' after its Cancel transaction had '{}' confirmations.",
-                    &db_vault.deposit_outpoint, n_confs
+                    "Forgetting about consumed vault at '{}' after its spending transaction \
+                     had at least '{}' confirmations.",
+                    &db_vault.deposit_outpoint,
+                    n_confs
                 );
             }
             continue;
         }
 
-        // Check if it just got confirmed.
-        let cancel_outpoint = cancel_tx.deposit_txin(&deposit_desc).outpoint();
-        if let Some(utxoinfo) = bitcoind.utxoinfo(&cancel_outpoint) {
-            if utxoinfo.bestblock != current_tip.hash {
-                // TODO
-            }
-
-            let confirmation_height = current_tip
-                .height
-                .checked_add(1)
-                .expect("A block height>2147483647?")
-                .checked_sub(
-                    // Can't be 0, as we don't include the mempool
-                    utxoinfo
-                        .confirmations
-                        .try_into()
-                        .expect("A block height>2147483648?"),
-                )
-                .expect("Impossible, we just checked the tip is in sync");
-            db_revoc_confirmed(db_path, db_vault.id, confirmation_height)?;
-
+        // If the chain didn't change and the Unvault UTxO was spent before the expiration of the
+        // CSV, it must have been canceled.
+        // Otherwise, we assume it was spent by managers. FIXME: is it fine?
+        let csv: i32 = config
+            .scripts_config
+            .unvault_descriptor
+            .csv_value()
+            .try_into()
+            .expect("CSV value doesn't fit in i32?");
+        let unvault_height = db_vault
+            .unvault_height
+            .expect("No unvault_height for unvaulted vault?");
+        if current_tip.height < unvault_height + csv {
             log::debug!(
-                "Vault at '{}' Cancel transaction '{}' confirmed at height '{}'",
+                "Noticed at height '{}' that Cancel transaction was confirmed for vault at '{}'",
+                current_tip.height,
                 &db_vault.deposit_outpoint,
-                cancel_tx.txid(),
-                confirmation_height
             );
-            continue;
+        } else {
+            log::debug!(
+                "Noticed at height '{}' that Spend transaction was confirmed for vault at '{}'",
+                current_tip.height,
+                &db_vault.deposit_outpoint,
+            )
         }
 
-        // If the chain didn't change, and there is no Cancel UTXO at the best block there
-        // are only 2 possibilities before the expiration of the CSV: either the Cancel
-        // transaction is still unconfirmed (and therefore the Unvault UTXO is still present)
-        // or it was spent.
-        if bitcoind.utxoinfo(&unvault_outpoint).is_none() {
-            if bitcoind.chain_tip().hash != current_tip.hash {
-                // TODO
-            }
-
-            let csv: i32 = config
-                .scripts_config
-                .unvault_descriptor
-                .csv_value()
-                .try_into()
-                .expect("CSV value doesn't fit in i32?");
-            let unvault_height = db_vault
-                .unvault_height
-                .expect("No unvault_height for unvaulted vault?");
-            db_revoc_confirmed(db_path, db_vault.id, current_tip.height)?;
-            if current_tip.height < unvault_height + csv {
-                log::debug!(
-                    "Noticed at height '{}' that Cancel transaction '{}' was confirmed for vault at '{}'",
-                    current_tip.height,
-                    cancel_tx.txid(),
-                    &db_vault.deposit_outpoint,
-                );
-            } else {
-                // If the timelock matured and we have no confirmed Cancel UTxO, either:
-                //  - a Spend transaction has spent the Unvault txo.
-                //  - another Cancel transaction was mined
-                //  - our Cancel transaction was mined but spent again
-                // In this case we just set the revocation height to the tip as a hack
-                // to still have it expire after REORG_WATCH_LIMIT
-                log::info!(
-                    "Noticed at height '{}' that Unvault UTxO '{}' was spent for vault at '{}', \
-                     but our Cancel transaction output is not part of the UTxO set.",
-                    current_tip.height,
-                    unvault_outpoint,
-                    &db_vault.deposit_outpoint,
-                );
-            }
-        }
-
-        // Ok the Cancel is still unconfirmed.
-        log::debug!(
-            "Cancel transaction '{}' for vault at '{}' is still unconfirmed at height '{}'",
-            cancel_tx.txid(),
-            &db_vault.deposit_outpoint,
-            current_tip.height
-        );
+        // Note we set the current tip height as spent height, no harm in overestimating this.
+        db_unvault_spender_confirmed(db_path, db_vault.id, current_tip.height)?;
     }
 
     Ok(())
@@ -442,9 +400,8 @@ fn new_block(
         &new_blk_info,
     )?;
 
-    // TODO: manage the non to-cancel too!
-    // Any Cancel tx still unconfirmed? Any to forget about?
-    manage_cancel_attempts(db_path, secp, config, bitcoind, current_tip)?;
+    // Any Cancel tx still unconfirmed? Any vault to forget about?
+    manage_unvaulted_vaults(db_path, secp, config, bitcoind, current_tip)?;
 
     // Any coin received on the FB wallet?
     // TODO
