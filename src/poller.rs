@@ -12,7 +12,7 @@ use crate::{
     plugins::{NewBlockInfo, VaultInfo},
 };
 use revault_tx::{
-    bitcoin::{consensus::encode, secp256k1},
+    bitcoin::{consensus::encode, secp256k1, OutPoint},
     scripts::{DerivedCpfpDescriptor, DerivedDepositDescriptor, DerivedUnvaultDescriptor},
     transactions::{CancelTransaction, RevaultTransaction, UnvaultTransaction},
     txins::{DepositTxIn, RevaultTxIn, UnvaultTxIn},
@@ -95,14 +95,23 @@ fn unvault_tx(
     )
 }
 
+struct UpdatedVaults {
+    pub successful_attempts: Vec<OutPoint>,
+    pub revaulted_attempts: Vec<OutPoint>,
+}
+
 fn manage_unvaulted_vaults(
     db_path: &path::Path,
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
     config: &Config,
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
-) -> Result<(), PollerError> {
+) -> Result<UpdatedVaults, PollerError> {
     let unvaulted_vaults = db_unvaulted_vaults(db_path)?;
+    let mut updated_vaults = UpdatedVaults {
+        successful_attempts: vec![],
+        revaulted_attempts: vec![],
+    };
 
     for db_vault in unvaulted_vaults {
         let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &db_vault);
@@ -166,12 +175,18 @@ fn manage_unvaulted_vaults(
             .unvault_height
             .expect("No unvault_height for unvaulted vault?");
         if current_tip.height < unvault_height + csv {
+            updated_vaults
+                .revaulted_attempts
+                .push(db_vault.deposit_outpoint);
             log::debug!(
                 "Noticed at height '{}' that Cancel transaction was confirmed for vault at '{}'",
                 current_tip.height,
                 &db_vault.deposit_outpoint,
             );
         } else {
+            updated_vaults
+                .successful_attempts
+                .push(db_vault.deposit_outpoint);
             log::debug!(
                 "Noticed at height '{}' that Spend transaction was confirmed for vault at '{}'",
                 current_tip.height,
@@ -183,7 +198,7 @@ fn manage_unvaulted_vaults(
         db_unvault_spender_confirmed(db_path, db_vault.id, current_tip.height)?;
     }
 
-    Ok(())
+    Ok(updated_vaults)
 }
 
 // TODO: actual feebump computation, register attempt in db, ..
@@ -256,7 +271,7 @@ fn check_for_unvault(
     config: &Config,
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
-) -> Result<NewBlockInfo, PollerError> {
+) -> Result<Vec<VaultInfo>, PollerError> {
     let deleg_vaults = db_delegated_vaults(db_path)?;
     let mut new_attempts = vec![];
 
@@ -299,12 +314,7 @@ fn check_for_unvault(
         }
     }
 
-    Ok(NewBlockInfo {
-        new_attempts,
-        // TODO: record and share canceled and spent attempts
-        successful_attempts: vec![],
-        revaulted_attempts: vec![],
-    })
+    Ok(new_attempts)
 }
 
 // Poll each of our plugins for vaults to be revaulted given the updates to our vaults' state
@@ -388,9 +398,20 @@ fn new_block(
     // TODO
 
     // Any Unvault txo confirmed?
-    let new_blk_info = check_for_unvault(db_path, secp, config, bitcoind, current_tip)?;
+    let new_attempts = check_for_unvault(db_path, secp, config, bitcoind, current_tip)?;
+
+    // Any Cancel tx still unconfirmed? Any vault to forget about?
+    let UpdatedVaults {
+        successful_attempts,
+        revaulted_attempts,
+    } = manage_unvaulted_vaults(db_path, secp, config, bitcoind, current_tip)?;
 
     // Any vault plugins tell us to revault?
+    let new_blk_info = NewBlockInfo {
+        new_attempts,
+        successful_attempts,
+        revaulted_attempts,
+    };
     maybe_revault(
         db_path,
         secp,
@@ -399,9 +420,6 @@ fn new_block(
         current_tip.height,
         &new_blk_info,
     )?;
-
-    // Any Cancel tx still unconfirmed? Any vault to forget about?
-    manage_unvaulted_vaults(db_path, secp, config, bitcoind, current_tip)?;
 
     // Any coin received on the FB wallet?
     // TODO
@@ -433,6 +451,11 @@ pub fn main_loop(
 
             new_block(db_path, secp, config, bitcoind, &bitcoind_tip)?;
             db_update_tip(db_path, bitcoind_tip.height, bitcoind_tip.hash)?;
+            log::debug!(
+                "Done processing block '{}' ({})",
+                bitcoind_tip.hash,
+                bitcoind_tip.height
+            );
         } else if bitcoind_tip.hash != db_instance.tip_blockhash {
             panic!("No reorg handling yet");
         }
