@@ -120,7 +120,8 @@ fn manage_cancel_attempts(
             None,
             &deposit_desc,
             /* FIXME: remove from the API */ 0,
-        );
+        )
+        .expect("Can only fail if we have an insane feebump input");
 
         // If it was confirmed, check for how long and maybe forget it. Otherwise check if it got
         // confirmed since our last poll.
@@ -232,7 +233,8 @@ fn revault(
         None,
         &deposit_desc,
         /* FIXME: remove from the API */ 0,
-    );
+    )
+    .expect("Can only fail if we have an insane feebumping input");
 
     for db_sig in db_cancel_signatures(db_path, db_vault.id)? {
         if let Err(e) = cancel_tx.add_cancel_sig(db_sig.pubkey, db_sig.signature, secp) {

@@ -20,7 +20,7 @@ macro_rules! from_json {
         serde_json::from_str($str).unwrap_or_else(|e| {
             eprintln!("Failed to deserialize '{}' as JSON: '{}'", $str, e);
             process::exit(1);
-        });
+        })
     };
 }
 
@@ -194,7 +194,7 @@ fn main() {
         });
     let der_unvault_desc = unvault_desc.derive(derivation_index.into(), &secp);
     let unvault_txin = unvault_tx.spend_unvault_txin(&der_unvault_desc);
-    let spend_txo = revault_tx::txouts::SpendTxOut::Destination(TxOut {
+    let spend_txo = revault_tx::txouts::SpendTxOut::new(TxOut {
         value: unvault_txin.txout().txout().value - 100_000,
         script_pubkey: Script::from_str("00144314bbb53718d0508343375a6c580421d3108cd6").unwrap(),
     });
@@ -202,6 +202,7 @@ fn main() {
     let mut spend_tx = revault_tx::transactions::SpendTransaction::new(
         vec![unvault_txin],
         vec![spend_txo],
+        None,
         &der_cpfp_desc,
         0, // FIXME: remove from the API
         true,

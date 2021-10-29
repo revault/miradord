@@ -98,6 +98,14 @@ fn process_sig_message<C: secp256k1::Verification>(
     let deposit_utxo = bitcoind
         .utxoinfo(&msg.deposit_outpoint)
         .ok_or(ListenerError::UnknownOutpoint(msg.deposit_outpoint))?;
+    log::debug!(
+        "Building tx chain with val {}, descriptors {}  --  {}  --  {}  --  {}",
+        deposit_utxo.value,
+        scripts_config.deposit_descriptor,
+        scripts_config.unvault_descriptor,
+        scripts_config.cpfp_descriptor,
+        &scripts_config.emergency_address
+    );
     let (_, mut cancel_tx, mut emer_tx, mut unemer_tx) = transaction_chain(
         msg.deposit_outpoint,
         deposit_utxo.value,
