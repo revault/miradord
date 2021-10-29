@@ -1,11 +1,10 @@
-import base64
 import logging
 import os
 
 from decimal import Decimal
 from ephemeral_port_reserve import reserve
 from test_framework.authproxy import AuthServiceProxy
-from test_framework.utils import TailableProc, wait_for, COIN, TIMEOUT
+from test_framework.utils import TailableProc, wait_for, COIN, TIMEOUT, BITCOIND_PATH
 
 
 class BitcoinDProxy:
@@ -50,7 +49,7 @@ class Bitcoind(TailableProc):
             os.makedirs(regtestdir)
 
         self.cmd_line = [
-            "bitcoind",
+            BITCOIND_PATH,
             "-datadir={}".format(bitcoin_dir),
             "-printtoconsole",
             "-server",

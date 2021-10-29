@@ -18,6 +18,7 @@ EXECUTOR_WORKERS = int(os.getenv("EXECUTOR_WORKERS", 20))
 VERBOSE = os.getenv("VERBOSE", "0") == "1"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "trace")
 assert LOG_LEVEL in ["trace", "debug", "info", "warn", "error"]
+BITCOIND_PATH = os.getenv("BITCOIND_PATH", "bitcoind")
 
 COIN = 10 ** 8
 

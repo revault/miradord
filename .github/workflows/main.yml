@@ -3,7 +3,18 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  tests:
+  linter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+            toolchain: stable
+            components: rustfmt
+            override: true
+      - run: cargo fmt -- --check
+
+  unit_tests:
     strategy:
       matrix:
         toolchain:
@@ -26,19 +37,3 @@ jobs:
         run: cargo build --verbose --color always
       - name: Test on Rust ${{ matrix.toolchain }}
         run: cargo test --verbose --color always --all-features
-      - name: Functional tests
-        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'nightly'
-        run: ./contrib/ci-functional-tests.sh
-        env:
-          RUST_BACKTRACE: 1
-
-  rustfmt_check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v1
-      - uses: actions-rs/toolchain@v1
-        with:
-            toolchain: stable
-            components: rustfmt
-            override: true
-      - run: cargo fmt -- --check

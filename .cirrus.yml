@@ -1,0 +1,43 @@
+task:
+  name: 'Functional tests'
+  container:
+    image: rust:latest
+
+  env:
+    EXECUTOR_WORKERS: 8
+    VERBOSE: 1
+    LOG_LEVEL: debug
+    TIMEOUT: 180
+    BITCOIND_VERSION: 22.0
+    BITCOIND_DIR_NAME: "bitcoin-$BITCOIND_VERSION"
+
+  registry_cache:
+    folder: $CARGO_HOME/registry
+    fingerprint_script: cat Cargo.lock
+  before_cache_script: rm -rf $CARGO_HOME/registry/index
+  target_cache:
+    folder: target
+    fingerprint_script:
+      - rustc --version
+      - cat Cargo.lock
+  bitcoind_cache:
+    folder: $BITCOIND_DIR_NAME
+
+  test_script: |
+    set -xe
+
+    # Install the dependencies
+    apt update && apt install -y python3 python3-venv
+
+    # Download the bitcoind binary
+    ARCHIVE_NAME="$BITCOIND_DIR_NAME.tar.gz"
+    curl https://bitcoincore.org/bin/bitcoin-core-$BITCOIND_VERSION/bitcoin-$BITCOIND_VERSION-x86_64-linux-gnu.tar.gz -o $ARCHIVE_NAME
+    tar -xzf $ARCHIVE_NAME
+    export BITCOIND_PATH=$BITCOIND_DIR_NAME/bin/bitcoind
+
+    # Compile the daemon and run the functional tests
+    cargo build
+    python3 -m venv venv
+    . venv/bin/activate
+    pip install -r tests/requirements.txt
+    POSTGRES_USER="test" POSTGRES_PASS="test" pytest -vvv -n 3 tests/
