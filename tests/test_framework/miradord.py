@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import socket
+import toml
 
 from test_framework.utils import (
     TailableProc,
@@ -36,6 +37,7 @@ class Miradord(TailableProc):
         coordinator_noise_key,
         coordinator_port,
         bitcoind,
+        plugins=[],
     ):
         TailableProc.__init__(self, datadir, verbose=VERBOSE)
 
@@ -95,6 +97,8 @@ class Miradord(TailableProc):
             f.write(f"addr = '127.0.0.1:{bitcoind.rpcport}'\n")
             f.write("poll_interval_secs = 5\n")
 
+            f.write(f"\n{toml.dumps({'plugins': plugins})}\n")
+
     def start(self):
         TailableProc.start(self)
         self.wait_for_logs(
@@ -110,7 +114,18 @@ class Miradord(TailableProc):
         except Exception:
             self.proc.kill()
 
-    def get_signed_txs(self, deposit_outpoint, deposit_value):
+    def add_plugins(self, plugins):
+        """Takes a list of dict representing plugin config to add to the watchtower and
+        restarts it."""
+        self.stop()
+        conf = toml.loads(open(self.conf_file, "r").read())
+        if "plugins" not in conf:
+            conf["plugins"] = []
+        conf["plugins"] += plugins
+        open(self.conf_file, "w").write(toml.dumps(conf))
+        self.start()
+
+    def get_signed_txs(self, deposit_outpoint, deposit_value, deriv_index=DERIV_INDEX):
         """
         Get the Unvault, Cancel, Emergency and Unvault Emergency (in this order) fully
         signed transactions extracted, ready to be broadcast for this deposit UTXO info.
@@ -125,7 +140,7 @@ class Miradord(TailableProc):
             self.emer_addr,
             deposit_outpoint,
             deposit_value,
-            DERIV_INDEX,
+            deriv_index,
         )
 
     def get_noise_conn(self):
@@ -201,9 +216,9 @@ class Miradord(TailableProc):
 
         return resp["ack"]
 
-    def watch_vault(self, deposit_outpoint, deposit_value, deriv_index):
+    def watch_vault(self, deposit_outpoint, deposit_value, deriv_index=DERIV_INDEX):
         """The deposit transaction must be confirmed. The deposit value is in sats."""
-        txs = self.get_signed_txs(deposit_outpoint, deposit_value)
+        txs = self.get_signed_txs(deposit_outpoint, deposit_value, deriv_index)
         emer_txid = self.bitcoind.rpc.decoderawtransaction(txs["emer"]["tx"])["txid"]
         unemer_txid = self.bitcoind.rpc.decoderawtransaction(txs["unemer"]["tx"])[
             "txid"
@@ -214,20 +229,20 @@ class Miradord(TailableProc):
 
         noise_conn = self.get_noise_conn()
         assert self.send_sigs(
-            txs["emer"]["sigs"], emer_txid, deposit_outpoint, DERIV_INDEX, noise_conn
+            txs["emer"]["sigs"], emer_txid, deposit_outpoint, deriv_index, noise_conn
         )
         assert self.send_sigs(
             txs["unemer"]["sigs"],
             unemer_txid,
             deposit_outpoint,
-            DERIV_INDEX,
+            deriv_index,
             noise_conn,
         )
         assert self.send_sigs(
             txs["cancel"]["sigs"],
             cancel_txid,
             deposit_outpoint,
-            DERIV_INDEX,
+            deriv_index,
             noise_conn,
         )
         self.wait_for_log("Now watching for Unvault broadcast.")
