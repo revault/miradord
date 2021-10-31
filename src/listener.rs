@@ -98,14 +98,6 @@ fn process_sig_message<C: secp256k1::Verification>(
     let deposit_utxo = bitcoind
         .utxoinfo(&msg.deposit_outpoint)
         .ok_or(ListenerError::UnknownOutpoint(msg.deposit_outpoint))?;
-    log::debug!(
-        "Building tx chain with val {}, descriptors {}  --  {}  --  {}  --  {}",
-        deposit_utxo.value,
-        scripts_config.deposit_descriptor,
-        scripts_config.unvault_descriptor,
-        scripts_config.cpfp_descriptor,
-        &scripts_config.emergency_address
-    );
     let (_, mut cancel_tx, mut emer_tx, mut unemer_tx) = transaction_chain(
         msg.deposit_outpoint,
         deposit_utxo.value,
@@ -119,10 +111,12 @@ fn process_sig_message<C: secp256k1::Verification>(
     )?;
 
     if msg.txid == emer_tx.txid() {
-        // Receiving the signatures of an Emergency tx means they just signed the revocation
-        // transactions. The vault must not exist yet.
+        // If we already have it, just acknowledge it.
         if db_vault(db_path, &msg.deposit_outpoint)?.is_some() {
-            return Err(ListenerError::UnexpectedEmerSig(msg.deposit_outpoint));
+            return Ok(SigResult {
+                ack: true,
+                txid: msg.txid,
+            });
         }
 
         // Check that the sig they gave us are valid, and enough to make the transaction valid.
@@ -675,7 +669,7 @@ mod tests {
             stakeholders.len()
         );
 
-        // We won't accept to process an Emergency for this vault anymore
+        // We will re-ACK any Emergency for this vault
         let msg = Sig {
             signatures: BTreeMap::new(),
             txid: emer.txid(),
@@ -684,9 +678,8 @@ mod tests {
         };
         assert!(
             process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("received an Emergency")
+                .unwrap()
+                .ack
         );
 
         // We won't accept to process a Cancel just yet
@@ -830,7 +823,7 @@ mod tests {
                 .contains("received an UnvaultEmergency")
         );
 
-        // We won't accept to process an Emergency either
+        // We would still accept to process an Emergency, though
         let msg = Sig {
             signatures: BTreeMap::new(),
             txid: emer.txid(),
@@ -839,9 +832,8 @@ mod tests {
         };
         assert!(
             process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("received an Emergency")
+                .unwrap()
+                .ack
         );
 
         let sighash = cancel
