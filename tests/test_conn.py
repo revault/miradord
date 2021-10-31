@@ -36,10 +36,7 @@ def test_simple_client_server(miradord, bitcoind):
         txs["emer"]["sigs"], emer_txid, deposit_outpoint, DERIV_INDEX, noise_conn
     )
 
-    # It will refuse that we send it twice but will happily accept the other sigs
-    assert not miradord.send_sigs(
-        txs["emer"]["sigs"], emer_txid, deposit_outpoint, DERIV_INDEX, noise_conn
-    )
+    # And if we send the rest it'll start watching for this vault
     unemer_txid = bitcoind.rpc.decoderawtransaction(txs["unemer"]["tx"])["txid"]
     assert miradord.send_sigs(
         txs["unemer"]["sigs"], unemer_txid, deposit_outpoint, DERIV_INDEX, noise_conn
@@ -48,3 +45,4 @@ def test_simple_client_server(miradord, bitcoind):
     assert miradord.send_sigs(
         txs["cancel"]["sigs"], cancel_txid, deposit_outpoint, DERIV_INDEX, noise_conn
     )
+    miradord.wait_for_log("Now watching for Unvault broadcast.")
