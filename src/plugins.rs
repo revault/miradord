@@ -4,6 +4,7 @@ use revault_tx::{
 };
 
 use std::{
+    borrow::Cow,
     error, fmt, fs,
     io::Write,
     os::unix::fs::MetadataExt,
@@ -112,6 +113,10 @@ impl Plugin {
         };
 
         Ok(Self { path, config })
+    }
+
+    pub fn path_str(&self) -> Cow<str> {
+        self.path.to_string_lossy()
     }
 
     /// Takes updates about our vaults' status and returns which should be Canceled, if any.

@@ -126,6 +126,16 @@ fn main() {
         process::exit(1);
     });
 
+    log::info!(
+        "Currently registered plugins: {}",
+        config
+            .plugins
+            .iter()
+            .map(|p| p.path_str())
+            .collect::<Vec<std::borrow::Cow<str>>>()
+            .join(", "),
+    );
+
     let mut data_dir = config.data_dir.clone().unwrap_or_else(|| {
         config_folder_path().unwrap_or_else(|e| {
             eprintln!("Error getting default data directory: '{}'.", e);
