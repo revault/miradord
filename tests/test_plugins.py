@@ -40,7 +40,7 @@ def test_max_value_in_flight(miradord, bitcoind):
         bitcoind.generate_block(1, unvault_txids[-1])
         miradord.wait_for_logs(
             [
-                f"Got a confirmed Unvault UTXO at '{unvault_txids[-1]}:0'",
+                f"Got a confirmed Unvault UTXO for vault at '{deposit_outpoint}'",
                 "Done processing block",
             ]
         )
@@ -67,7 +67,7 @@ def test_max_value_in_flight(miradord, bitcoind):
     cancel_txid = bitcoind.rpc.decoderawtransaction(txs["cancel"]["tx"])["txid"]
     miradord.wait_for_logs(
         [
-            f"Got a confirmed Unvault UTXO at '{unvault_txid}:0'",
+            f"Got a confirmed Unvault UTXO for vault at '{deposit_outpoint}'",
             f"Broadcasted Cancel transaction '{txs['cancel']['tx']}'",
             f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is still unspent",
         ]
@@ -92,7 +92,10 @@ def test_max_value_in_flight(miradord, bitcoind):
     bitcoind.rpc.sendrawtransaction(txs["unvault"]["tx"])
     bitcoind.generate_block(1, unvault_txid)
     miradord.wait_for_logs(
-        [f"Got a confirmed Unvault UTXO at '{unvault_txid}:0'", "Done processing block"]
+        [
+            f"Got a confirmed Unvault UTXO for vault at '{deposit_outpoint}'",
+            "Done processing block",
+        ]
     )
     assert bitcoind.rpc.gettxout(unvault_txid, 0, True) is not None
     # Leave it a chance to broadcast the Cancel
@@ -141,7 +144,7 @@ def test_multiple_plugins(miradord, bitcoind):
     bitcoind.rpc.sendrawtransaction(txs["unvault"]["tx"])
     bitcoind.generate_block(1, unvault_txid)
     miradord.wait_for_log(
-        f"Got a confirmed Unvault UTXO at '{unvault_txid}:0'",
+        f"Got a confirmed Unvault UTXO for vault at '{deposit_outpoint}'",
     )
     # The Cancel transaction has not been broadcast
     assert "bestblock" in bitcoind.rpc.gettxout(unvault_txid, 0, True)
@@ -163,7 +166,7 @@ def test_multiple_plugins(miradord, bitcoind):
     cancel_txid = bitcoind.rpc.decoderawtransaction(txs["cancel"]["tx"])["txid"]
     miradord.wait_for_logs(
         [
-            f"Got a confirmed Unvault UTXO at '{unvault_txid}:0'",
+            f"Got a confirmed Unvault UTXO for vault at '{deposit_outpoint}'",
             f"Broadcasted Cancel transaction '{txs['cancel']['tx']}'",
             f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is still unspent",
         ]

@@ -298,8 +298,8 @@ fn check_for_unvault(
             let unvault_height = current_tip.height - (confs - 1);
             assert!(confs > 0 && unvault_height > 0);
             log::debug!(
-                "Got a confirmed Unvault UTXO at '{}': '{:?}'",
-                &unvault_txin.outpoint(),
+                "Got a confirmed Unvault UTXO for vault at '{}': '{:?}'",
+                &db_vault.deposit_outpoint,
                 utxoinfo
             );
 
