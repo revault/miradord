@@ -1,4 +1,6 @@
 import os
+from random import randint
+from math import ceil
 
 from fixtures import *
 from test_framework.utils import COIN, DEPOSIT_ADDRESS, DERIV_INDEX, CSV
@@ -131,15 +133,49 @@ def test_simple_spend_detection(miradord, bitcoind):
     miradord.wait_for_log(f"Forgetting about consumed vault at '{deposit_outpoint}'")
 
 
+def test_vault_reserve_feerate_update(miradord, bitcoind):
+    """
+    Check that the vault_reserve_feerate is updated as expected with each new block.
+    """
+    START_BLOCK = 120
+    WINDOW_LEN = 144 * 90
+    HIGH_FEERATE = 2000
+    # Starting at block 120, with no transactions in the next block the vault_reserve_feerate
+    # should not increase.
+    bitcoind.generate_block(1, [])
+    miradord.wait_for_logs([f"Not enough blocks to compute vault reserve feerate"])
+    miradord.wait_for_logs(
+        [f"last_update for vault reserve feerate set to {START_BLOCK+1}"]
+    )
+
+    # FIXME: generating so many blocks takes me ~25 minutes
+    # for block in range(START_BLOCK+1, WINDOW_LEN+5):
+    #     wait_for_mempool = []
+    #     for tx in range(0, 10):
+    #         txid = bitcoind.generate_tx_with_feerate(HIGH_FEERATE)
+    #         wait_for_mempool.append(txid)
+    #     bitcoind.generate_block(1, wait_for_mempool)
+
+    # miradord.wait_for_logs[f"vault reserve feerate updated to"]
+
+
 def test_feerate_estimation(miradord, bitcoind):
+    """
+    Test estimatesmartfee usage and fallback
+    """
     # Generate some transaction history for estimatesmartfee.
-    # 10 transactions in 50 blocks (send to deposit address)
+    # 10 transactions in 25 blocks (send to deposit address)
     amount = 1
-    for block in range(0, 50):
+    for block in range(0, 25):
         wait_for_mempool = []
-        for tx in range(0, 10):
+        for tx in range(0, randint(5, 15)):
             txid, outpoint = bitcoind.create_utxo(DEPOSIT_ADDRESS, amount)
             wait_for_mempool.append(txid)
         bitcoind.generate_block(1, wait_for_mempool)
-    feerate = bitcoind.estimatesmartfee(1)["feerate"].normalize()
+
+    feerate = ceil(
+        bitcoind.estimatesmartfee(1)["feerate"] * 100000
+    )  # Convert from BTC/kb to sat/vB
     miradord.wait_for_logs([f"feerate estimate is {feerate}"])
+
+    # FIXME: How to test fallback?

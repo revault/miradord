@@ -73,6 +73,15 @@ CREATE TABLE signatures (
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
 );
+
+/* Track vault_feerate_reserve value - the cumulative maximum of the 95-th
+   quantile of mean block feerates over a 90 day window
+*/
+CREATE TABLE feerates (
+    id INTEGER PRIMARY KEY NOT NULL,
+    last_update INTEGER NOT NULL,
+    vault_reserve_feerate INTEGER NOT NULL
+);
 ";
 
 /// A row in the "instances" table
@@ -244,6 +253,30 @@ impl TryFrom<&rusqlite::Row<'_>> for DbSignature {
             tx_type,
             pubkey,
             signature,
+        })
+    }
+}
+
+/// A row in the "feerates" table
+#[derive(Clone, Debug)]
+pub struct DbFeerate {
+    pub id: i64,
+    pub last_update: i32,
+    pub vault_reserve_feerate: u64,
+}
+
+impl TryFrom<&rusqlite::Row<'_>> for DbFeerate {
+    type Error = rusqlite::Error;
+
+    fn try_from(row: &rusqlite::Row) -> Result<Self, Self::Error> {
+        let id = row.get(0)?;
+        let last_update = row.get(1)?;
+        let vault_reserve_feerate = row.get(2)?;
+
+        Ok(DbFeerate {
+            id,
+            last_update,
+            vault_reserve_feerate,
         })
     }
 }

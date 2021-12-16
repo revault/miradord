@@ -116,6 +116,35 @@ class Bitcoind(TailableProc):
                 return txid, f"{txid}:{vout}"
             vout += 1
 
+    def generate_tx_with_feerate(self, feerate):
+        """Send 1 coin to an address"""
+        addr = self.rpc.getnewaddress()
+        amount = 1
+        comment = ""
+        comment_to = ""
+        subtract_fee_amount = False
+        replaceable = False
+        conf_target = None
+        est_mode = "unset"
+        avoid_reuse = False
+        fee_rate = feerate
+        txid = self.rpc.sendtoaddress(
+            addr,
+            amount,
+            comment,
+            comment_to,
+            subtract_fee_amount,
+            replaceable,
+            conf_target,
+            est_mode,
+            avoid_reuse,
+            feerate,
+        )
+        return txid
+
+    def get_block_stats(self, block_height):
+        return self.rpc.getblockstats(block_height)
+
     def get_coins(self, amount_btc):
         # subsidy halving is every 150 blocks on regtest, it's a rough estimate
         # to avoid looping in most cases
