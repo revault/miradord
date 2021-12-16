@@ -425,6 +425,167 @@ impl BitcoinD {
         self.make_node_request_failible("sendrawtransaction", &params!(tx_hex))
             .map(|_| ())
     }
+
+    /// Get fee-rate estimate
+    /// TODO: limit conf_target to range 1 to 1008
+    pub fn feerate_estimate(
+        &self,
+        conf_target: i16,
+    ) -> Result<BlockFeerateEstimate, BitcoindError> {
+        let result = self.make_node_request("estimatesmartfee", &params!(conf_target));
+
+        if let Some(_) = result.get("errors") {
+            // Fallback feerate estimate, using "85Q1H" strategy
+            let height = self
+                .make_node_request("getblockcount", &params!())
+                .as_i64()
+                .expect("Invalid height value");
+            let window_len = 6; // 1 hour of blocks
+            let mut feerates = Vec::with_capacity(window_len);
+            for i in height - window_len as i64..height {
+                feerates.push(self.block_stats(i as i32)?.avgfeerate);
+            }
+            let q: f64 = 0.85;
+            if let Some(f) = quantile(feerates, q) {
+                Ok(BlockFeerateEstimate {
+                    feerate: f,
+                    block: height,
+                })
+            } else {
+                // FIXME: return Error instead of constant feerate?
+                Ok(BlockFeerateEstimate {
+                    feerate: 5,
+                    block: height,
+                })
+            }
+        } else {
+            // estimatesmartfee succeeded, feerate units of the response are BTC/kb
+            let mut f = result
+                .get("feerate")
+                .and_then(|f| f.as_f64())
+                .expect("'estimatesmartfee' didn't return a valid 'feerate' entry")
+                * 100000.0_f64; // convert to sat/vB
+            f = f.round();
+
+            Ok(BlockFeerateEstimate {
+                feerate: f as u64,
+                block: result
+                    .get("blocks")
+                    .and_then(|n| n.as_i64())
+                    .expect("'estimatesmartfee' didn't return a 'blocks' entry"),
+            })
+        }
+    }
+
+    /// Get block stats
+    pub fn block_stats(&self, block_height: i32) -> Result<BlockStats, BitcoindError> {
+        let res = self.make_node_request_failible("getblockstats", &params!(block_height))?;
+
+        Ok(BlockStats {
+            block: block_height,
+            avgfee: res
+                .get("avgfee")
+                .and_then(|f| f.as_u64())
+                .expect("'getblockstats' didn't return a valid entry"),
+            avgfeerate: res
+                .get("avgfeerate")
+                .and_then(|f| f.as_u64())
+                .expect("'getblockstats' didn't return a valid entry"),
+            avgtxsize: res
+                .get("avgtxsize")
+                .and_then(|f| f.as_u64())
+                .expect("'getblockstats' didn't return a valid entry"),
+            feerate_percentiles: res
+                .get("feerate_percentiles")
+                .expect("'getblockstats' didn't return a valid entry for 'feerate_percentiles'")
+                .as_array()
+                .expect("'getblockstats' didn't return a valid array for 'feerate_percentiles'")
+                .into_iter()
+                .map(|f| f.as_u64().expect("Failed to cast to u64"))
+                .collect(),
+            maxfee: res
+                .get("maxfee")
+                .and_then(|f| f.as_u64())
+                .expect("'getblockstats' didn't return a valid entry"),
+            maxfeerate: res
+                .get("maxfeerate")
+                .and_then(|f| f.as_u64())
+                .expect("'getblockstats' didn't return a valid entry"),
+            minfee: res
+                .get("minfee")
+                .and_then(|f| f.as_u64())
+                .expect("'getblockstats' didn't return a valid entry"),
+            minfeerate: res
+                .get("minfeerate")
+                .and_then(|f| f.as_u64())
+                .expect("'getblockstats' didn't return a valid entry"),
+        })
+    }
+
+    /// Get feerate reserve per vault with 95Q90D
+    pub fn feerate_reserve_per_vault(
+        &self,
+        block_height: i32,
+    ) -> Result<Option<u64>, BitcoindError> {
+        let window_len: usize = 144 * 90; // 90 days of blocks
+
+        // Not enough blocks to perform the computation, return None
+        if block_height < window_len as i32 {
+            return Ok(None);
+        }
+
+        let mut feerates = Vec::with_capacity(window_len);
+
+        for i in block_height - window_len as i32..block_height + 1 {
+            feerates.push(self.block_stats(i)?.avgfeerate)
+        }
+
+        let q: f64 = 0.95; // 95th quantile
+        if let Some(f) = quantile(feerates, q) {
+            return Ok(Some(f));
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// Helper function to compute the value of a collection that sits at or immediately above the
+/// given quantile
+pub fn quantile(mut collection: Vec<u64>, quantile: f64) -> Option<u64> {
+    let len = collection.len();
+    if len == 0 {
+        return None;
+    }
+    collection.sort();
+    for (i, f) in collection.iter().enumerate() {
+        if i as f64 >= quantile * len as f64 {
+            return Some(*f);
+        }
+    }
+    None
+}
+
+/// TODO: Feerate type
+// #[derive(Debug)]
+// pub struct Feerate(pub f64);
+
+/// Block Statistics
+pub struct BlockStats {
+    pub block: i32,
+    pub avgfee: u64,
+    pub avgfeerate: u64,
+    pub avgtxsize: u64,
+    pub feerate_percentiles: Vec<u64>,
+    pub maxfee: u64,
+    pub maxfeerate: u64,
+    pub minfee: u64,
+    pub minfeerate: u64,
+}
+
+/// Feerate estimate at associated block
+pub struct BlockFeerateEstimate {
+    pub feerate: u64,
+    pub block: i64,
 }
 
 /// Info about bitcoind's sync state

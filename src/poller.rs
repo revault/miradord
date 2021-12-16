@@ -7,7 +7,8 @@ use crate::{
     database::{
         db_cancel_signatures, db_del_vault, db_delegated_vaults, db_instance,
         db_should_cancel_vault, db_should_not_cancel_vault, db_unvault_spender_confirmed,
-        db_unvaulted_vaults, db_update_tip, db_vault, schema::DbVault, DatabaseError,
+        db_unvaulted_vaults, db_update_tip, db_update_vault_reserve_feerate, db_vault,
+        db_vault_reserve_feerate, schema::DbVault, DatabaseError,
     },
     plugins::{NewBlockInfo, VaultInfo},
 };
@@ -380,6 +381,55 @@ fn maybe_revault(
     Ok(())
 }
 
+fn update_vault_reserve_feerate(
+    db_path: &path::Path,
+    bitcoind: &BitcoinD,
+    current_tip: &ChainTip,
+) -> Result<(), PollerError> {
+    let vault_reserve_feerate = db_vault_reserve_feerate(&db_path)?;
+
+    // Don't update if last_update was at current_tip
+    if vault_reserve_feerate.last_update == current_tip.height {
+        log::debug!(
+            "vault reserve feerate already up-to-date: {}",
+            vault_reserve_feerate.vault_reserve_feerate
+        );
+        return Ok(());
+    } else {
+        // Compute the vault_reserve_feerate for each block from last update to current tip and
+        // update if it has increased.
+        for height in vault_reserve_feerate.last_update..=current_tip.height {
+            if let Some(candidate) = bitcoind.feerate_reserve_per_vault(height)? {
+                if vault_reserve_feerate.vault_reserve_feerate < candidate {
+                    db_update_vault_reserve_feerate(&db_path, height, candidate)?;
+                    log::debug!(
+                        "vault reserve feerate updated to {} at block {}",
+                        candidate,
+                        height,
+                    );
+                } else {
+                    // update the last_update value
+                    db_update_vault_reserve_feerate(
+                        &db_path,
+                        height,
+                        vault_reserve_feerate.vault_reserve_feerate,
+                    )?;
+                    log::debug!("last_update for vault reserve feerate set to {}", height,);
+                }
+            } else {
+                log::debug!("Not enough blocks to compute vault reserve feerate");
+                db_update_vault_reserve_feerate(
+                    &db_path,
+                    height,
+                    vault_reserve_feerate.vault_reserve_feerate,
+                )?;
+                log::debug!("last_update for vault reserve feerate set to {}", height,);
+            }
+        }
+        Ok(())
+    }
+}
+
 // We only do actual processing on new blocks. This puts a natural limit on the amount of work
 // we are doing, reduces the number of edge cases we need to handle, and there is no benefit to try
 // to cancel Unvaults right after their broadcast.
@@ -391,8 +441,17 @@ fn new_block(
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
 ) -> Result<(), PollerError> {
-    // Update the fee-bumping reserves estimates
-    // TODO
+    log::debug!("Begin processing new block: {:?}", current_tip.height);
+    // Update the vault_reserve_feerate
+    update_vault_reserve_feerate(db_path, bitcoind, current_tip)?;
+
+    // Update the current feerate estimate
+    let feerate_estimate = bitcoind.feerate_estimate(1)?;
+    log::debug!(
+        "At block {} feerate estimate is {:?}",
+        current_tip.height,
+        feerate_estimate.feerate
+    );
 
     // Any vault to forget and feebump coins to unregister?
     // TODO

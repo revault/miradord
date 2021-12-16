@@ -4,13 +4,16 @@ use revault_tx::{
     bitcoin::{secp256k1, util::bip32, Amount, BlockHash, Network, OutPoint},
     scripts::{CpfpDescriptor, DepositDescriptor, UnvaultDescriptor},
 };
-use schema::{DbInstance, DbSignature, DbVault, SigTxType, SCHEMA};
+use schema::{DbFeerate, DbInstance, DbSignature, DbVault, SigTxType, SCHEMA};
 
 use std::{collections, convert::TryInto, fs, io, os::unix::fs::OpenOptionsExt, path, time};
 
 use rusqlite::params;
 
 pub const DB_VERSION: u32 = 0;
+// FIXME: Use correct values
+pub const INIT_VAULT_RESERVE_FEERATE: u64 = 1000;
+pub const INIT_VAULT_RESERVE_HEIGHT: i32 = 680000;
 
 #[derive(Debug)]
 pub enum DatabaseError {
@@ -22,6 +25,8 @@ pub enum DatabaseError {
     DescriptorMismatch(String, String),
     /// An operation was requested on a vault that doesn't exist
     UnknownVault(Box<dyn std::fmt::Debug>),
+    /// Vault reserve feerate not found
+    VaultReserveFeerateNotFound(String),
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -43,6 +48,9 @@ impl std::fmt::Display for DatabaseError {
                 "Operation requested on vault at '{:?}' but no such vault exist in database.",
                 *id
             ),
+            Self::VaultReserveFeerateNotFound(ref e) => {
+                write!(f, "Vault reserve feerate not found: {}", e)
+            }
         }
     }
 }
@@ -412,6 +420,41 @@ pub fn db_cancel_signatures(
     db_sigs_by_type(db_path, vault_id, SigTxType::Cancel)
 }
 
+pub fn db_update_vault_reserve_feerate(
+    db_path: &path::Path,
+    last_update: i32,
+    vault_reserve_feerate: u64,
+) -> Result<(), DatabaseError> {
+    db_exec(db_path, |db_tx| {
+        db_tx.execute(
+            "UPDATE feerates
+            SET last_update = (?1),
+                vault_reserve_feerate = (?2)",
+            params![last_update, vault_reserve_feerate],
+        )?;
+        Ok(())
+    })
+}
+
+pub fn db_vault_reserve_feerate(db_path: &path::Path) -> Result<DbFeerate, DatabaseError> {
+    let res: Option<DbFeerate> = db_query(
+        db_path,
+        "SELECT * FROM feerates ORDER BY last_update DESC LIMIT 1",
+        [],
+        |row| row.try_into(),
+    )?
+    .pop();
+
+    match res {
+        Some(db_feerate) => Ok(db_feerate),
+        None => {
+            return Err(DatabaseError::VaultReserveFeerateNotFound(String::from(
+                "Feerates table not correctly initialised.",
+            )))
+        }
+    }
+}
+
 // Create the db file with RW permissions only for the user
 fn create_db_file(db_path: &path::Path) -> Result<(), DatabaseError> {
     let mut options = fs::OpenOptions::new();
@@ -460,7 +503,19 @@ fn create_db(
                 vec![0u8; 32],
             ],
         )?;
-
+        if network == Network::Bitcoin {
+            tx.execute(
+                "INSERT INTO feerates (last_update, vault_reserve_feerate)
+                VALUES (?1,?2)",
+                params![INIT_VAULT_RESERVE_HEIGHT, INIT_VAULT_RESERVE_FEERATE],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO feerates (last_update, vault_reserve_feerate)
+                VALUES (?1,?2)",
+                params![0, INIT_VAULT_RESERVE_FEERATE],
+            )?;
+        }
         Ok(())
     })
 }
@@ -547,7 +602,7 @@ mod tests {
     use super::*;
 
     // Create a dummy database and return its path (to be deleted by the caller)
-    fn get_db() -> path::PathBuf {
+    fn get_db(network: Network) -> path::PathBuf {
         let db_path: path::PathBuf =
             format!("scratch_test_{:?}.sqlite3", thread::current().id()).into();
         let deposit_desc = DepositDescriptor::from_str("wsh(multi(2,xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU/*,xpub6AaffFGfH6WXfm6pwWzmUMuECQnoLeB3agMKaLyEBZ5ZVfwtnS5VJKqXBt8o5ooCWVy2H87GsZshp7DeKE25eWLyd1Ccuh2ZubQUkgpiVux/*))#n3cj9mhy").unwrap();
@@ -557,14 +612,7 @@ mod tests {
         // Remove any potential leftover from a previous crashed session
         fs::remove_file(&db_path).unwrap_or_else(|_| ());
 
-        setup_db(
-            &db_path,
-            &deposit_desc,
-            &unvault_desc,
-            &cpfp_desc,
-            Network::Bitcoin,
-        )
-        .unwrap();
+        setup_db(&db_path, &deposit_desc, &unvault_desc, &cpfp_desc, network).unwrap();
 
         db_path
     }
@@ -698,7 +746,7 @@ mod tests {
     // Sanity check we can create, delegate and delete a vault
     #[test]
     fn db_vault_creation() {
-        let db_path = get_db();
+        let db_path = get_db(Network::Bitcoin);
         let outpoint_a = OutPoint::from_str(
             "5bebdb97b54e2268b3fccd4aeea99419d87a92f88f27e906ceea5e863946a731:0",
         )
@@ -974,7 +1022,7 @@ mod tests {
 
     #[test]
     fn db_tip_update() {
-        let db_path = get_db();
+        let db_path = get_db(Network::Bitcoin);
 
         let height = 21;
         let hash =
@@ -995,6 +1043,34 @@ mod tests {
         assert_eq!(instance.tip_blockhash, hash);
 
         // Cleanup
+        fs::remove_file(&db_path).unwrap();
+    }
+
+    #[test]
+    fn db_feerates_table() {
+        let db_path = get_db(Network::Testnet);
+        let vault_reserve_feerate = 1001;
+        let test_feerate = 1337;
+
+        let init_feerate = db_vault_reserve_feerate(&db_path)
+            .unwrap()
+            .vault_reserve_feerate;
+        assert_eq!(init_feerate, INIT_VAULT_RESERVE_FEERATE);
+
+        for last_update in 1..=10 {
+            if last_update < 10 {
+                db_update_vault_reserve_feerate(&db_path, last_update, vault_reserve_feerate)
+                    .unwrap();
+            } else {
+                db_update_vault_reserve_feerate(&db_path, last_update, test_feerate).unwrap();
+            }
+        }
+
+        let row = db_vault_reserve_feerate(&db_path).unwrap();
+
+        assert_eq!(row.last_update, 10);
+        assert_eq!(row.vault_reserve_feerate, test_feerate);
+
         fs::remove_file(&db_path).unwrap();
     }
 }
