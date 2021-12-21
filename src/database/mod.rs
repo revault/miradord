@@ -331,11 +331,6 @@ pub fn db_del_vault(db_path: &path::Path, vault_id: i64) -> Result<(), DatabaseE
     })
 }
 
-/// Get a list of all vaults in the database
-fn db_vaults(db_path: &path::Path) -> Result<Vec<DbVault>, DatabaseError> {
-    db_query(db_path, "SELECT * FROM vaults", [], |row| row.try_into())
-}
-
 /// Get a vault in the database by its deposit outpoint
 pub fn db_vault(
     db_path: &path::Path,
@@ -389,6 +384,7 @@ fn db_sigs_by_type(
 }
 
 /// Get all the Emergency signatures of this vault
+#[cfg(test)]
 pub fn db_emergency_signatures(
     db_path: &path::Path,
     vault_id: i64,
@@ -567,6 +563,11 @@ mod tests {
         .unwrap();
 
         db_path
+    }
+
+    // Get a list of all vaults in the database
+    fn db_vaults(db_path: &path::Path) -> Result<Vec<DbVault>, DatabaseError> {
+        db_query(db_path, "SELECT * FROM vaults", [], |row| row.try_into())
     }
 
     #[test]
