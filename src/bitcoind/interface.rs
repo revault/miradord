@@ -243,18 +243,6 @@ impl BitcoinD {
         self.make_request(&self.node_client, method, params, true)
     }
 
-    fn make_vault_request<'a, 'b>(
-        &self,
-        method: &'a str,
-        params: &'b [Box<serde_json::value::RawValue>],
-    ) -> Json {
-        self.make_request(&self.vault_client, method, params, false)
-            .unwrap_or_else(|e| {
-                log::error!("Fatal bitcoind RPC error (vault watchonly client): '{}'", e);
-                process::exit(1);
-            })
-    }
-
     /// Network name as returned by 'getblockchainfo'
     pub fn bip70_net(&self) -> String {
         self.make_node_request("getblockchaininfo", &[])
