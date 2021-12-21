@@ -29,7 +29,6 @@ pub enum ListenerError {
     BitcoinD(BitcoindError),
     UnknownTxid(Txid),
     UnknownOutpoint(OutPoint),
-    UnexpectedEmerSig(OutPoint),
     UnexpectedUnEmerSig(OutPoint),
     UnexpectedCancelSig(OutPoint),
 }
@@ -43,8 +42,6 @@ impl std::fmt::Display for ListenerError {
             Self::BitcoinD(ref e) => write!(f, "bitcoind communication error: '{}'", e),
             Self::UnknownOutpoint(ref o) => write!(f, "unknown outpoint: '{}'", o),
             Self::UnknownTxid(ref t) => write!(f, "unknown txid: '{}'", t),
-            Self::UnexpectedEmerSig(ref o) => write!(f, "received an Emergency signature for an \
-                                                         existing vault ('{}')", o),
             Self::UnexpectedUnEmerSig(ref o) => write!(f, "received an UnvaultEmergency signature for a \
                                                            delegated vault or before receiving Emergency \
                                                            signatures for  '{}'", o),

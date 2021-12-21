@@ -13,10 +13,7 @@ use daemonize::daemonize;
 use database::setup_db;
 use keys::read_or_create_noise_key;
 use listener::listener_main;
-use revault_net::{
-    noise::PublicKey as NoisePubKey,
-    sodiumoxide::{self, crypto::scalarmult::curve25519},
-};
+use revault_net::sodiumoxide;
 use revault_tx::bitcoin::{hashes::hex::ToHex, secp256k1};
 
 use std::{env, fs, os::unix::fs::DirBuilderExt, panic, path, process, sync, thread, time};
