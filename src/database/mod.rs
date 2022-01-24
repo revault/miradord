@@ -20,8 +20,6 @@ pub enum DatabaseError {
     InvalidNetwork(Network),
     // First is db descriptor, second is config descriptor
     DescriptorMismatch(String, String),
-    /// An operation was requested on a vault that doesn't exist
-    UnknownVault(Box<dyn std::fmt::Debug>),
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -38,11 +36,6 @@ impl std::fmt::Display for DatabaseError {
             Self::DescriptorMismatch(ref db_desc, ref conf_desc) => {
                 write!(f, "Descriptor mismatch: '{}' vs '{}'", db_desc, conf_desc)
             }
-            Self::UnknownVault(ref id) => write!(
-                f,
-                "Operation requested on vault at '{:?}' but no such vault exist in database.",
-                *id
-            ),
         }
     }
 }
@@ -151,13 +144,36 @@ pub fn db_update_tip(
     })
 }
 
-/// Register a new vault to be watched. Atomically inserts the vault and the Emergency signatures.
+fn db_tx_insert_sigs(
+    db_tx: &rusqlite::Transaction,
+    vault_id: i64,
+    sigs: &collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>,
+    tx_type: SigTxType,
+) -> Result<(), DatabaseError> {
+    for (key, sig) in sigs {
+        db_tx.execute(
+            "INSERT INTO signatures (vault_id, tx_type, pubkey, signature) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                vault_id,
+                tx_type as i64,
+                key.serialize().to_vec(),
+                sig.serialize_der().to_vec()
+            ],
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Register a new vault to be watched. Atomically inserts the vault and the Revocation signatures.
 pub fn db_new_vault(
     db_path: &path::Path,
     deposit_outpoint: &OutPoint,
     derivation_index: bip32::ChildNumber,
     amount: Amount,
     emer_sigs: &collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>,
+    cancel_sigs: &collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>,
+    unemer_sigs: &collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>,
 ) -> Result<(), DatabaseError> {
     let instance_id = db_instance(db_path)?.id;
     let deposit_txid = deposit_outpoint.txid.to_vec();
@@ -166,103 +182,21 @@ pub fn db_new_vault(
     let amount = amount_to_i64(&amount);
 
     assert!(
-        emer_sigs.len() > 0,
-        "Registering a vault without Emergency signature"
+        emer_sigs.len() > 0 && cancel_sigs.len() > 0 && unemer_sigs.len() > 0,
+        "Registering a vault with an empty set of signatures"
     );
 
     db_exec(db_path, |db_tx| {
         db_tx.execute(
-            "INSERT INTO vaults (instance_id, deposit_txid, deposit_vout, derivation_index, amount, delegated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![instance_id, deposit_txid, deposit_vout, deriv_index, amount, false],
+            "INSERT INTO vaults (instance_id, deposit_txid, deposit_vout, derivation_index, amount)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![instance_id, deposit_txid, deposit_vout, deriv_index, amount],
         )?;
 
         let vault_id = db_tx.last_insert_rowid();
-        for (key, sig) in emer_sigs {
-            db_tx.execute(
-                "INSERT INTO signatures (vault_id, tx_type, pubkey, signature) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    vault_id,
-                    SigTxType::Emergency as i64,
-                    key.serialize().to_vec(),
-                    sig.serialize_der().to_vec()
-                ],
-            )?;
-        }
-
-        Ok(())
-    })
-}
-
-/// Mark a vault as being delegated.
-pub fn db_delegate_vault(
-    db_path: &path::Path,
-    deposit_outpoint: &OutPoint,
-) -> Result<(), DatabaseError> {
-    let db_vault = db_vault(db_path, deposit_outpoint)?
-        .ok_or_else(|| DatabaseError::UnknownVault(Box::new(*deposit_outpoint)))?;
-
-    db_exec(db_path, |db_tx| {
-        db_tx.execute(
-            "UPDATE vaults SET delegated = 1 WHERE id = (?1)",
-            params![db_vault.id],
-        )?;
-
-        Ok(())
-    })
-}
-
-/// Store signatures for a Cancel transaction.
-pub fn db_store_cancel_sigs(
-    db_path: &path::Path,
-    deposit_outpoint: &OutPoint,
-    sigs: &collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>,
-) -> Result<(), DatabaseError> {
-    let db_vault = db_vault(db_path, deposit_outpoint)?
-        .ok_or_else(|| DatabaseError::UnknownVault(Box::new(*deposit_outpoint)))?;
-
-    assert!(sigs.len() > 0, "Storing no signature");
-
-    db_exec(db_path, |db_tx| {
-        for (key, sig) in sigs {
-            db_tx.execute(
-                "INSERT INTO signatures (vault_id, tx_type, pubkey, signature) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    db_vault.id,
-                    SigTxType::Cancel as i64,
-                    key.serialize().to_vec(),
-                    sig.serialize_der().to_vec()
-                ],
-            )?;
-        }
-
-        Ok(())
-    })
-}
-
-/// Store signatures for an UnvaultEmergency transaction.
-pub fn db_store_unemer_sigs(
-    db_path: &path::Path,
-    deposit_outpoint: &OutPoint,
-    sigs: &collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>,
-) -> Result<(), DatabaseError> {
-    let db_vault = db_vault(db_path, deposit_outpoint)?
-        .ok_or_else(|| DatabaseError::UnknownVault(Box::new(*deposit_outpoint)))?;
-
-    assert!(sigs.len() > 0, "Storing no signature");
-
-    db_exec(db_path, |db_tx| {
-        for (key, sig) in sigs {
-            db_tx.execute(
-                "INSERT INTO signatures (vault_id, tx_type, pubkey, signature) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    db_vault.id,
-                    SigTxType::UnvaultEmergency as i64,
-                    key.serialize().to_vec(),
-                    sig.serialize_der().to_vec()
-                ],
-            )?;
-        }
+        db_tx_insert_sigs(db_tx, vault_id, emer_sigs, SigTxType::Emergency)?;
+        db_tx_insert_sigs(db_tx, vault_id, cancel_sigs, SigTxType::Cancel)?;
+        db_tx_insert_sigs(db_tx, vault_id, unemer_sigs, SigTxType::UnvaultEmergency)?;
 
         Ok(())
     })
@@ -348,12 +282,11 @@ pub fn db_vault(
     .map(|mut rows| rows.pop())
 }
 
-/// Get a list of all vaults we need to watch Unvault broadcast for that weren't yet both
-/// unvaulted and taken a decision for.
-pub fn db_delegated_vaults(db_path: &path::Path) -> Result<Vec<DbVault>, DatabaseError> {
+/// Get a list of all vaults that weren't yet both unvaulted and taken a decision for.
+pub fn db_blank_vaults(db_path: &path::Path) -> Result<Vec<DbVault>, DatabaseError> {
     db_query(
         db_path,
-        "SELECT * FROM vaults WHERE delegated = 1 AND should_cancel ISNULL",
+        "SELECT * FROM vaults WHERE should_cancel IS NULL",
         [],
         |row| row.try_into(),
     )
@@ -393,6 +326,7 @@ pub fn db_emergency_signatures(
 }
 
 /// Get all the UnvaultEmergency signatures of this vault
+#[cfg(test)]
 pub fn db_unvault_emergency_signatures(
     db_path: &path::Path,
     vault_id: i64,
@@ -737,8 +671,17 @@ mod tests {
             dummy_sig!(secp256k1::Signature::from_str("30440220398b5d0a75911f69c37c71e929727d16bf48a6b6cc46b1db0d6097f91eb7ecfa0220379c43fc3db9b70b2d3d5d945f8d51ae2660bdedd94b8468abb92c7f2c1989a8").unwrap()),
         ].iter().copied().collect();
 
-        // We can insert and query no-yet-delegated vaults
-        db_new_vault(&db_path, &outpoint_a, deriv_a, amount_a, &emer_sigs_a).unwrap();
+        // We can insert and query no-yet-unvaulted vaults
+        db_new_vault(
+            &db_path,
+            &outpoint_a,
+            deriv_a,
+            amount_a,
+            &emer_sigs_a,
+            &cancel_sigs_a,
+            &unemer_sigs_a,
+        )
+        .unwrap();
         assert_eq!(
             db_vault(&db_path, &outpoint_a).unwrap().unwrap(),
             DbVault {
@@ -747,7 +690,6 @@ mod tests {
                 deposit_outpoint: outpoint_a,
                 derivation_index: deriv_a,
                 amount: amount_a,
-                delegated: false,
                 should_cancel: None,
                 unvault_height: None,
                 spent_height: None,
@@ -757,7 +699,16 @@ mod tests {
             db_vault(&db_path, &outpoint_a).unwrap().unwrap(),
             db_vaults(&db_path).unwrap()[0]
         );
-        db_new_vault(&db_path, &outpoint_b, deriv_b, amount_b, &emer_sigs_b).unwrap();
+        db_new_vault(
+            &db_path,
+            &outpoint_b,
+            deriv_b,
+            amount_b,
+            &emer_sigs_b,
+            &cancel_sigs_b,
+            &unemer_sigs_b,
+        )
+        .unwrap();
         assert_eq!(
             db_vault(&db_path, &outpoint_b).unwrap().unwrap(),
             DbVault {
@@ -766,7 +717,6 @@ mod tests {
                 deposit_outpoint: outpoint_b,
                 derivation_index: deriv_b,
                 amount: amount_b,
-                delegated: false,
                 should_cancel: None,
                 unvault_height: None,
                 spent_height: None,
@@ -779,9 +729,9 @@ mod tests {
             ],
             db_vaults(&db_path).unwrap()
         );
-        assert!(db_delegated_vaults(&db_path).unwrap().is_empty());
+        assert_eq!(db_blank_vaults(&db_path).unwrap().len(), 2);
 
-        // We can get the Emergency signatures for these vaults now
+        // We can get the revocation signatures for these vaults now
         assert_eq!(
             db_emergency_signatures(&db_path, 1)
                 .unwrap()
@@ -791,63 +741,6 @@ mod tests {
             emer_sigs_a
         );
         assert_eq!(
-            db_emergency_signatures(&db_path, 2)
-                .unwrap()
-                .into_iter()
-                .map(|db_sig| (db_sig.pubkey, db_sig.signature))
-                .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
-            emer_sigs_b
-        );
-
-        // We can't insert a vault twice
-        db_new_vault(&db_path, &outpoint_a, deriv_a, amount_a, &emer_sigs_a).unwrap_err();
-
-        // Querying a random outpoint will return None
-        let uk_outpoint = OutPoint::from_str(
-            "69a747cd1ea7ce4904e6173b06a4a83e0df173661046e70f5128b3c9bef8241d:1",
-        )
-        .unwrap();
-        assert!(db_vault(&db_path, &uk_outpoint).unwrap().is_none());
-
-        // We can delegate the vaults, they'll be marked as such
-        db_delegate_vault(&db_path, &outpoint_a).unwrap();
-        assert_eq!(
-            db_vault(&db_path, &outpoint_a).unwrap().unwrap(),
-            DbVault {
-                id: 1,
-                instance_id: 1,
-                deposit_outpoint: outpoint_a,
-                derivation_index: deriv_a,
-                amount: amount_a,
-                delegated: true,
-                should_cancel: None,
-                unvault_height: None,
-                spent_height: None,
-            }
-        );
-        db_delegate_vault(&db_path, &outpoint_b).unwrap();
-        assert_eq!(
-            db_vault(&db_path, &outpoint_b).unwrap().unwrap(),
-            DbVault {
-                id: 2,
-                instance_id: 1,
-                deposit_outpoint: outpoint_b,
-                derivation_index: deriv_b,
-                amount: amount_b,
-                delegated: true,
-                should_cancel: None,
-                unvault_height: None,
-                spent_height: None,
-            }
-        );
-        assert_eq!(
-            db_delegated_vaults(&db_path).unwrap(),
-            db_vaults(&db_path).unwrap()
-        );
-
-        // We can store and get the signatures of the second-stage transactions for these vaults
-        db_store_unemer_sigs(&db_path, &outpoint_a, &unemer_sigs_a).unwrap();
-        assert_eq!(
             db_unvault_emergency_signatures(&db_path, 1)
                 .unwrap()
                 .into_iter()
@@ -855,7 +748,6 @@ mod tests {
                 .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
             unemer_sigs_a
         );
-        db_store_cancel_sigs(&db_path, &outpoint_a, &cancel_sigs_a).unwrap();
         assert_eq!(
             db_cancel_signatures(&db_path, 1)
                 .unwrap()
@@ -864,7 +756,14 @@ mod tests {
                 .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
             cancel_sigs_a
         );
-        db_store_unemer_sigs(&db_path, &outpoint_b, &unemer_sigs_b).unwrap();
+        assert_eq!(
+            db_emergency_signatures(&db_path, 2)
+                .unwrap()
+                .into_iter()
+                .map(|db_sig| (db_sig.pubkey, db_sig.signature))
+                .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
+            emer_sigs_b
+        );
         assert_eq!(
             db_unvault_emergency_signatures(&db_path, 2)
                 .unwrap()
@@ -873,7 +772,6 @@ mod tests {
                 .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
             unemer_sigs_b
         );
-        db_store_cancel_sigs(&db_path, &outpoint_b, &cancel_sigs_b).unwrap();
         assert_eq!(
             db_cancel_signatures(&db_path, 2)
                 .unwrap()
@@ -883,25 +781,43 @@ mod tests {
             cancel_sigs_b
         );
 
+        // We can't insert a vault twice
+        db_new_vault(
+            &db_path,
+            &outpoint_a,
+            deriv_a,
+            amount_a,
+            &emer_sigs_a,
+            &cancel_sigs_a,
+            &unemer_sigs_b,
+        )
+        .unwrap_err();
+
+        // Querying a random outpoint will return None
+        let uk_outpoint = OutPoint::from_str(
+            "69a747cd1ea7ce4904e6173b06a4a83e0df173661046e70f5128b3c9bef8241d:1",
+        )
+        .unwrap();
+        assert!(db_vault(&db_path, &uk_outpoint).unwrap().is_none());
+
         // And if we mark them as either 'to cancel' or 'to let go through', they won't be
-        // returned by db_delegated_vaults
+        // returned by db_blank_vaults
         db_should_cancel_vault(&db_path, 1, 10142091).unwrap();
         assert_eq!(
-            db_delegated_vaults(&db_path).unwrap(),
+            db_blank_vaults(&db_path).unwrap(),
             vec![DbVault {
                 id: 2,
                 instance_id: 1,
                 deposit_outpoint: outpoint_b,
                 derivation_index: deriv_b,
                 amount: amount_b,
-                delegated: true,
                 should_cancel: None,
                 unvault_height: None,
                 spent_height: None,
             }]
         );
         db_should_not_cancel_vault(&db_path, 2, 10142088).unwrap();
-        assert_eq!(db_delegated_vaults(&db_path).unwrap(), vec![]);
+        assert_eq!(db_blank_vaults(&db_path).unwrap(), vec![]);
 
         // We marked both as being unvaulted
         assert_eq!(
@@ -913,7 +829,6 @@ mod tests {
                     deposit_outpoint: outpoint_a,
                     derivation_index: deriv_a,
                     amount: amount_a,
-                    delegated: true,
                     should_cancel: Some(true),
                     unvault_height: Some(10142091),
                     spent_height: None,
@@ -924,7 +839,6 @@ mod tests {
                     deposit_outpoint: outpoint_b,
                     derivation_index: deriv_b,
                     amount: amount_b,
-                    delegated: true,
                     should_cancel: Some(false),
                     unvault_height: Some(10142088),
                     spent_height: None,
@@ -942,7 +856,6 @@ mod tests {
                 deposit_outpoint: outpoint_a,
                 derivation_index: deriv_a,
                 amount: amount_a,
-                delegated: true,
                 should_cancel: Some(true),
                 unvault_height: Some(10142091),
                 spent_height: Some(10142101),

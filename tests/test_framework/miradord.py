@@ -199,52 +199,45 @@ class Miradord(TailableProc):
 
         return resp["result"]
 
-    def send_sigs(self, sigs, txid, deposit_outpoint, deriv_index, noise_conn=None):
+    def send_sigs(
+        self,
+        emer_sigs,
+        cancel_sigs,
+        unemer_sigs,
+        deposit_outpoint,
+        deriv_index,
+        noise_conn=None,
+    ):
         """
-        Send a `sig` message to the watchtower, optionally using an existing
+        Send a `sigs` message to the watchtower, optionally using an existing
         connection.
         """
         params = {
-            "signatures": sigs,
-            "txid": txid,
+            "signatures": {
+                "emergency": emer_sigs,
+                "cancel": cancel_sigs,
+                "unvault_emergency": unemer_sigs,
+            },
             "deposit_outpoint": deposit_outpoint,
             "derivation_index": deriv_index,
         }
 
-        resp = self.send_msg("sig", params, noise_conn)
-        assert resp["txid"] == txid  # Everything is synchronous
-
+        resp = self.send_msg("sigs", params, noise_conn)
         return resp["ack"]
 
     def watch_vault(self, deposit_outpoint, deposit_value, deriv_index=DERIV_INDEX):
         """The deposit transaction must be confirmed. The deposit value is in sats."""
         txs = self.get_signed_txs(deposit_outpoint, deposit_value, deriv_index)
-        emer_txid = self.bitcoind.rpc.decoderawtransaction(txs["emer"]["tx"])["txid"]
-        unemer_txid = self.bitcoind.rpc.decoderawtransaction(txs["unemer"]["tx"])[
-            "txid"
-        ]
-        cancel_txid = self.bitcoind.rpc.decoderawtransaction(txs["cancel"]["tx"])[
-            "txid"
-        ]
 
         noise_conn = self.get_noise_conn()
         assert self.send_sigs(
-            txs["emer"]["sigs"], emer_txid, deposit_outpoint, deriv_index, noise_conn
-        )
-        assert self.send_sigs(
-            txs["unemer"]["sigs"],
-            unemer_txid,
-            deposit_outpoint,
-            deriv_index,
-            noise_conn,
-        )
-        assert self.send_sigs(
+            txs["emer"]["sigs"],
             txs["cancel"]["sigs"],
-            cancel_txid,
+            txs["unemer"]["sigs"],
             deposit_outpoint,
             deriv_index,
             noise_conn,
         )
-        self.wait_for_log("Now watching for Unvault broadcast.")
+        self.wait_for_log(f"Registered a new vault at '{deposit_outpoint}'")
 
         return txs

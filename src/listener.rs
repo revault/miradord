@@ -1,21 +1,18 @@
 use crate::{
     bitcoind::{interface::BitcoinD, BitcoindError},
     config::{Config, ScriptsConfig},
-    database::{
-        db_delegate_vault, db_new_vault, db_store_cancel_sigs, db_store_unemer_sigs,
-        db_unvault_emergency_signatures, db_vault, DatabaseError,
-    },
+    database::{db_new_vault, db_vault, DatabaseError},
 };
 
 use revault_net::{
     message::{
-        watchtower::{Sig, SigResult},
+        watchtower::{Signatures, Sigs, SigsResult},
         RequestParams, ResponseResult,
     },
     noise::SecretKey as NoisePrivkey,
 };
 use revault_tx::{
-    bitcoin::{secp256k1, OutPoint, Txid},
+    bitcoin::{secp256k1, OutPoint},
     transactions::{transaction_chain, RevaultTransaction},
 };
 
@@ -27,10 +24,7 @@ pub enum ListenerError {
     Db(DatabaseError),
     Tx(revault_tx::Error),
     BitcoinD(BitcoindError),
-    UnknownTxid(Txid),
     UnknownOutpoint(OutPoint),
-    UnexpectedUnEmerSig(OutPoint),
-    UnexpectedCancelSig(OutPoint),
 }
 
 impl std::fmt::Display for ListenerError {
@@ -41,13 +35,6 @@ impl std::fmt::Display for ListenerError {
             Self::Tx(ref e) => write!(f, "transaction handling error: '{}'", e),
             Self::BitcoinD(ref e) => write!(f, "bitcoind communication error: '{}'", e),
             Self::UnknownOutpoint(ref o) => write!(f, "unknown outpoint: '{}'", o),
-            Self::UnknownTxid(ref t) => write!(f, "unknown txid: '{}'", t),
-            Self::UnexpectedUnEmerSig(ref o) => write!(f, "received an UnvaultEmergency signature for a \
-                                                           delegated vault or before receiving Emergency \
-                                                           signatures for  '{}'", o),
-            Self::UnexpectedCancelSig(ref o) => write!(f, "received a Cancel signature for a \
-                                                           delegated vault or before receiving both Emergency \
-                                                           and UnEmer signatures for  '{}'", o),
         }
     }
 }
@@ -85,13 +72,13 @@ impl From<BitcoindError> for ListenerError {
 }
 
 // TODO: make Emergency sharing optional
-fn process_sig_message<C: secp256k1::Verification>(
+fn process_sigs_message<C: secp256k1::Verification>(
     db_path: &path::Path,
     scripts_config: &ScriptsConfig,
     bitcoind: &sync::Arc<BitcoinD>,
-    msg: Sig,
+    msg: Sigs,
     secp: &secp256k1::Secp256k1<C>,
-) -> Result<SigResult, ListenerError> {
+) -> Result<SigsResult, ListenerError> {
     let deposit_utxo = bitcoind
         .utxoinfo(&msg.deposit_outpoint)
         .ok_or(ListenerError::UnknownOutpoint(msg.deposit_outpoint))?;
@@ -107,100 +94,51 @@ fn process_sig_message<C: secp256k1::Verification>(
         secp,
     )?;
 
-    if msg.txid == emer_tx.txid() {
-        // If we already have it, just acknowledge it.
-        if db_vault(db_path, &msg.deposit_outpoint)?.is_some() {
-            return Ok(SigResult {
-                ack: true,
-                txid: msg.txid,
-            });
-        }
-
-        // Check that the sig they gave us are valid, and enough to make the transaction valid.
-        for (key, sig) in msg.signatures.iter() {
-            // Note this checks for ALL|ACP.
-            emer_tx.add_emer_sig(*key, *sig, secp)?;
-        }
-        emer_tx.finalize(secp)?;
-
-        // Ok, we have enough info to be able to broadcast it. Store it as a not-yet-delegated
-        // vault.
-        db_new_vault(
-            db_path,
-            &msg.deposit_outpoint,
-            msg.derivation_index,
-            deposit_utxo.value,
-            &msg.signatures,
-        )?;
-        log::debug!("Registered a new vault at '{}'", &msg.deposit_outpoint);
-
-        Ok(SigResult {
-            ack: true,
-            txid: msg.txid,
-        })
-    } else if msg.txid == unemer_tx.txid() {
-        // If we are receiving the signatures of an UnEmer tx they must have already sent the sigs
-        // for the Emergency one.
-        let db_vault = db_vault(db_path, &msg.deposit_outpoint)?
-            .ok_or(ListenerError::UnexpectedUnEmerSig(msg.deposit_outpoint))?;
-        if db_vault.delegated || !db_unvault_emergency_signatures(db_path, db_vault.id)?.is_empty()
-        {
-            return Err(ListenerError::UnexpectedUnEmerSig(msg.deposit_outpoint));
-        }
-
-        // Check that the sig they gave us are valid, and enough to make the transaction valid
-        // before storing it.
-        for (key, sig) in msg.signatures.iter() {
-            unemer_tx.add_emer_sig(*key, *sig, secp)?;
-        }
-        unemer_tx.finalize(secp)?;
-        db_store_unemer_sigs(db_path, &msg.deposit_outpoint, &msg.signatures)?;
+    // If we already have it, just acknowledge it.
+    if db_vault(db_path, &msg.deposit_outpoint)?.is_some() {
         log::debug!(
-            "Got UnEmer transaction signatures for vault at '{}'",
+            "Got signatures for already registered vault '{}'",
             &msg.deposit_outpoint
         );
-
-        Ok(SigResult {
-            ack: true,
-            txid: msg.txid,
-        })
-    } else if msg.txid == cancel_tx.txid() {
-        // Receiving the signatures of a Cancel tx means they just delegated this vault and we need
-        // to start watching for Unvault broadcasts.
-        let db_vault = db_vault(db_path, &msg.deposit_outpoint)?
-            .ok_or(ListenerError::UnexpectedCancelSig(msg.deposit_outpoint))?;
-        if db_vault.delegated {
-            return Err(ListenerError::UnexpectedCancelSig(msg.deposit_outpoint));
-        }
-        // We check their validity before storing them hence it's enough to just check if they are
-        // present.
-        if db_unvault_emergency_signatures(db_path, db_vault.id)?.is_empty() {
-            return Err(ListenerError::UnexpectedCancelSig(msg.deposit_outpoint));
-        }
-
-        // Check that the sig they gave us are valid, and enough to make the transaction valid.
-        for (key, sig) in msg.signatures.iter() {
-            cancel_tx.add_cancel_sig(*key, *sig, secp)?;
-        }
-        cancel_tx.finalize(secp)?;
-
-        // Ok, store those signatures and mark the vault as being delegated if it's not already
-        db_store_cancel_sigs(db_path, &msg.deposit_outpoint, &msg.signatures)?;
-        if !db_vault.delegated {
-            db_delegate_vault(db_path, &msg.deposit_outpoint)?;
-        }
-        log::debug!(
-            "Got Cancel transaction signatures for vault at '{}'. Now watching for Unvault broadcast.",
-            &msg.deposit_outpoint
-        );
-
-        Ok(SigResult {
-            ack: true,
-            txid: msg.txid,
-        })
-    } else {
-        Err(ListenerError::UnknownTxid(msg.txid))
+        return Ok(SigsResult { ack: true });
     }
+
+    // Otherwise, check the sigs they gave us are valid
+    let Sigs {
+        signatures:
+            Signatures {
+                emergency,
+                cancel,
+                unvault_emergency,
+            },
+        ..
+    } = msg;
+    for (key, sig) in emergency.iter() {
+        // Note this checks for ALL|ACP.
+        emer_tx.add_emer_sig(*key, *sig, secp)?;
+    }
+    emer_tx.finalize(secp)?;
+    for (key, sig) in cancel.iter() {
+        cancel_tx.add_cancel_sig(*key, *sig, secp)?;
+    }
+    cancel_tx.finalize(secp)?;
+    for (key, sig) in unvault_emergency.iter() {
+        unemer_tx.add_emer_sig(*key, *sig, secp)?;
+    }
+    unemer_tx.finalize(secp)?;
+
+    db_new_vault(
+        db_path,
+        &msg.deposit_outpoint,
+        msg.derivation_index,
+        deposit_utxo.value,
+        &emergency,
+        &cancel,
+        &unvault_emergency,
+    )?;
+    log::debug!("Registered a new vault at '{}'", &msg.deposit_outpoint);
+
+    Ok(SigsResult { ack: true })
 }
 
 /// Wait for connections from the stakeholder on the configured interface and process `sig` messages.
@@ -235,24 +173,23 @@ pub fn listener_main(
         // Handle all messages from this connection.
         loop {
             match kk_stream.read_req(|req_params| match req_params {
-                RequestParams::WtSig(sig_msg) => {
-                    log::debug!("Decoded request: {:#?}", sig_msg);
+                RequestParams::WtSigs(sigs_msg) => {
+                    log::debug!("Decoded request: {:#?}", sigs_msg);
 
-                    let txid = sig_msg.txid;
-                    match process_sig_message(
+                    match process_sigs_message(
                         db_path,
                         &config.scripts_config,
                         &bitcoind,
-                        sig_msg,
+                        sigs_msg,
                         &secp_ctx,
                     ) {
                         Ok(res) => {
                             log::debug!("Decoded response: {:#?}", res);
-                            Some(ResponseResult::WtSig(res))
+                            Some(ResponseResult::WtSigs(res))
                         }
                         Err(e) => {
                             log::error!("Error when processing 'sig' message: '{}'.", e);
-                            Some(ResponseResult::WtSig(SigResult { ack: false, txid }))
+                            Some(ResponseResult::WtSigs(SigsResult { ack: false }))
                         }
                     }
                 }
@@ -294,10 +231,13 @@ mod tests {
 
     use crate::{
         config::BitcoindConfig,
-        database::{db_cancel_signatures, db_emergency_signatures, setup_db},
+        database::{
+            db_cancel_signatures, db_emergency_signatures, db_unvault_emergency_signatures,
+            setup_db,
+        },
     };
     use revault_tx::{
-        bitcoin::{util::bip32, Address, Amount, Network, SigHashType, Txid},
+        bitcoin::{util::bip32, Address, Amount, Network, SigHashType},
         miniscript::descriptor::{DescriptorPublicKey, DescriptorXKey, Wildcard},
         scripts::{CpfpDescriptor, DepositDescriptor, EmergencyAddress, UnvaultDescriptor},
     };
@@ -452,7 +392,7 @@ mod tests {
         bitcoind_client
     }
 
-    // Sanity check `sig` message processing
+    // Sanity check `sigs` message processing
     #[test]
     fn sig_message() {
         let secp_ctx = secp256k1::Secp256k1::new();
@@ -496,7 +436,7 @@ mod tests {
         .unwrap();
         let deposit_value = Amount::from_sat(8765432);
         let derivation_index = bip32::ChildNumber::from(45678);
-        let (_, cancel, emer, unemer) = transaction_chain(
+        let (_, cancel_tx, emer_tx, unemer_tx) = transaction_chain(
             deposit_outpoint,
             deposit_value,
             &scripts_config.deposit_descriptor,
@@ -512,54 +452,12 @@ mod tests {
         // This starts a dummy server to answer our gettxout requests
         let bitcoind = sync::Arc::from(dummy_bitcoind(deposit_value));
 
-        // Invalid txid, no sigs
-        let msg = Sig {
-            signatures: BTreeMap::new(),
-            txid: Txid::default(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("unknown txid"),
-        );
-
-        // An UnEmer before an Emer
-        let msg = Sig {
-            signatures: BTreeMap::new(),
-            txid: unemer.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("received an UnvaultEmergency")
-        );
-
-        // A Cancel before an Emer
-        let msg = Sig {
-            signatures: BTreeMap::new(),
-            txid: cancel.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("received a Cancel")
-        );
-
-        // Not enough signatures
-        let sighash = emer
+        // Not enough emergency signatures
+        let sighash = emer_tx
             .signature_hash(0, SigHashType::AllPlusAnyoneCanPay)
             .unwrap();
         let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+        let emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
             [..2]
             .iter()
             .map(|xpriv| {
@@ -570,23 +468,30 @@ mod tests {
                 )
             })
             .collect();
-        let msg = Sig {
+        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = BTreeMap::new();
+        let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            BTreeMap::new();
+        let signatures = Signatures {
+            emergency,
+            cancel,
+            unvault_emergency,
+        };
+        let msg = Sigs {
             signatures,
-            txid: emer.txid(),
             deposit_outpoint,
             derivation_index,
         };
         assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("Revault transaction finalisation error")
         );
 
-        // Enough sigs, but invalid signature type
-        let bad_sighash = emer.signature_hash(0, SigHashType::All).unwrap();
+        // Enough emergency sigs, but invalid signature type
+        let bad_sighash = emer_tx.signature_hash(0, SigHashType::All).unwrap();
         let bad_sighash = secp256k1::Message::from_slice(&bad_sighash).unwrap();
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+        let emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
             .iter()
             .map(|xpriv| {
                 let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
@@ -596,23 +501,31 @@ mod tests {
                 )
             })
             .collect();
-        let msg = Sig {
+        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = BTreeMap::new();
+        let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            BTreeMap::new();
+        let signatures = Signatures {
+            emergency,
+            cancel,
+            unvault_emergency,
+        };
+        let msg = Sigs {
             signatures,
-            txid: emer.txid(),
             deposit_outpoint,
             derivation_index,
         };
         assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("Invalid signature")
         );
 
-        // Enough invalid sigs
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+        // Enough invalid emergency sigs
+        let emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
             .iter()
             .map(|xpriv| {
+                // Note the derivation index increment
                 let privkey = xpriv
                     .derive_priv(&secp_ctx, &[derivation_index.increment().unwrap()])
                     .unwrap();
@@ -622,21 +535,47 @@ mod tests {
                 )
             })
             .collect();
-        let msg = Sig {
+        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = BTreeMap::new();
+        let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            BTreeMap::new();
+        let signatures = Signatures {
+            emergency,
+            cancel,
+            unvault_emergency,
+        };
+        let msg = Sigs {
             signatures,
-            txid: emer.txid(),
             deposit_outpoint,
             derivation_index,
         };
         assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
                 .unwrap_err()
                 .to_string()
                 .contains("Miniscript Error: could not satisfy")
         );
 
-        // Enough *valid* sigs, vault must now be registered and Emer sigs present
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+        // Valid emergency signatures.
+        let emergency_valid: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            stakeholders_priv
+                .iter()
+                .map(|xpriv| {
+                    let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
+                    (
+                        privkey.private_key.public_key(&secp_ctx).key,
+                        secp_ctx.sign(&sighash, &privkey.private_key.key),
+                    )
+                })
+                .collect();
+
+        // Now do the same dance with Cancel signatures.
+
+        // Not enough Cancel signatures
+        let sighash = cancel_tx
+            .signature_hash(0, SigHashType::AllPlusAnyoneCanPay)
+            .unwrap();
+        let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
+        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv[..2]
             .iter()
             .map(|xpriv| {
                 let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
@@ -646,302 +585,240 @@ mod tests {
                 )
             })
             .collect();
-        let msg = Sig {
-            signatures,
-            txid: emer.txid(),
-            deposit_outpoint,
-            derivation_index,
+        let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            BTreeMap::new();
+        let signatures = Signatures {
+            emergency: emergency_valid.clone(),
+            cancel,
+            unvault_emergency,
         };
-        assert_eq!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx).unwrap(),
-            SigResult {
-                ack: true,
-                txid: emer.txid()
-            }
-        );
-        let vault = db_vault(&db_path, &deposit_outpoint).unwrap().unwrap();
-        assert_eq!(vault.delegated, false);
-        assert_eq!(
-            db_emergency_signatures(&db_path, vault.id).unwrap().len(),
-            stakeholders.len()
-        );
-
-        // We will re-ACK any Emergency for this vault
-        let msg = Sig {
-            signatures: BTreeMap::new(),
-            txid: emer.txid(),
+        let msg = Sigs {
+            signatures,
             deposit_outpoint,
             derivation_index,
         };
         assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+                .unwrap_err()
+                .to_string()
+                .contains("Revault transaction finalisation error"),
+        );
+
+        // Enough Cancel sigs, but invalid signature type
+        let bad_sighash = cancel_tx.signature_hash(0, SigHashType::All).unwrap();
+        let bad_sighash = secp256k1::Message::from_slice(&bad_sighash).unwrap();
+        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+            .iter()
+            .map(|xpriv| {
+                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
+                (
+                    privkey.private_key.public_key(&secp_ctx).key,
+                    secp_ctx.sign(&bad_sighash, &privkey.private_key.key),
+                )
+            })
+            .collect();
+        let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            BTreeMap::new();
+        let signatures = Signatures {
+            emergency: emergency_valid.clone(),
+            cancel,
+            unvault_emergency,
+        };
+        let msg = Sigs {
+            signatures,
+            deposit_outpoint,
+            derivation_index,
+        };
+        assert!(
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid signature")
+        );
+
+        // Enough invalid Cancel sigs
+        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+            .iter()
+            .map(|xpriv| {
+                // Note the derivation index increment
+                let privkey = xpriv
+                    .derive_priv(&secp_ctx, &[derivation_index.increment().unwrap()])
+                    .unwrap();
+                (
+                    privkey.private_key.public_key(&secp_ctx).key,
+                    secp_ctx.sign(&sighash, &privkey.private_key.key),
+                )
+            })
+            .collect();
+        let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            BTreeMap::new();
+        let signatures = Signatures {
+            emergency: emergency_valid.clone(),
+            cancel,
+            unvault_emergency,
+        };
+        let msg = Sigs {
+            signatures,
+            deposit_outpoint,
+            derivation_index,
+        };
+        assert!(
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+                .unwrap_err()
+                .to_string()
+                .contains("Miniscript Error: could not satisfy")
+        );
+
+        // Valid Cancel signatures.
+        let cancel_valid: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+            .iter()
+            .map(|xpriv| {
+                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
+                (
+                    privkey.private_key.public_key(&secp_ctx).key,
+                    secp_ctx.sign(&sighash, &privkey.private_key.key),
+                )
+            })
+            .collect();
+
+        // Now do the same dance with Unvault Emergency signatures.
+
+        // Not enough UnEmer signatures
+        let sighash = unemer_tx
+            .signature_hash(0, SigHashType::AllPlusAnyoneCanPay)
+            .unwrap();
+        let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
+        let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            stakeholders_priv[..2]
+                .iter()
+                .map(|xpriv| {
+                    let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
+                    (
+                        privkey.private_key.public_key(&secp_ctx).key,
+                        secp_ctx.sign(&sighash, &privkey.private_key.key),
+                    )
+                })
+                .collect();
+        let signatures = Signatures {
+            emergency: emergency_valid.clone(),
+            cancel: cancel_valid.clone(),
+            unvault_emergency,
+        };
+        let msg = Sigs {
+            signatures,
+            deposit_outpoint,
+            derivation_index,
+        };
+        assert!(
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+                .unwrap_err()
+                .to_string()
+                .contains("Revault transaction finalisation error")
+        );
+
+        // Enough UnEmer sigs, but invalid signature type
+        let bad_sighash = unemer_tx.signature_hash(0, SigHashType::All).unwrap();
+        let bad_sighash = secp256k1::Message::from_slice(&bad_sighash).unwrap();
+        let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            stakeholders_priv
+                .iter()
+                .map(|xpriv| {
+                    let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
+                    (
+                        privkey.private_key.public_key(&secp_ctx).key,
+                        secp_ctx.sign(&bad_sighash, &privkey.private_key.key),
+                    )
+                })
+                .collect();
+        let signatures = Signatures {
+            emergency: emergency_valid.clone(),
+            cancel: cancel_valid.clone(),
+            unvault_emergency,
+        };
+        let msg = Sigs {
+            signatures,
+            deposit_outpoint,
+            derivation_index,
+        };
+        assert!(
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid signature")
+        );
+
+        // Enough invalid UnEmer sigs
+        let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            stakeholders_priv
+                .iter()
+                .map(|xpriv| {
+                    // Note the derivation index increment
+                    let privkey = xpriv
+                        .derive_priv(&secp_ctx, &[derivation_index.increment().unwrap()])
+                        .unwrap();
+                    (
+                        privkey.private_key.public_key(&secp_ctx).key,
+                        secp_ctx.sign(&sighash, &privkey.private_key.key),
+                    )
+                })
+                .collect();
+        let signatures = Signatures {
+            emergency: emergency_valid.clone(),
+            cancel: cancel_valid.clone(),
+            unvault_emergency,
+        };
+        let msg = Sigs {
+            signatures,
+            deposit_outpoint,
+            derivation_index,
+        };
+        assert!(
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+                .unwrap_err()
+                .to_string()
+                .contains("Miniscript Error: could not satisfy")
+        );
+
+        // Now, enough valid signatures of all kinds.
+        let unemer_valid: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+            .iter()
+            .map(|xpriv| {
+                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
+                (
+                    privkey.private_key.public_key(&secp_ctx).key,
+                    secp_ctx.sign(&sighash, &privkey.private_key.key),
+                )
+            })
+            .collect();
+        let signatures = Signatures {
+            emergency: emergency_valid,
+            cancel: cancel_valid,
+            unvault_emergency: unemer_valid,
+        };
+        let msg = Sigs {
+            signatures,
+            deposit_outpoint,
+            derivation_index,
+        };
+        // We must register the vault.
+        assert!(
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg.clone(), &secp_ctx)
                 .unwrap()
                 .ack
         );
+        // And it becomes (as well as all rev sigs) queriable.
+        assert!(db_vault(&db_path, &deposit_outpoint).unwrap().is_some());
+        assert!(!db_emergency_signatures(&db_path, 1).unwrap().is_empty());
+        assert!(!db_cancel_signatures(&db_path, 1).unwrap().is_empty());
+        assert!(!db_unvault_emergency_signatures(&db_path, 1)
+            .unwrap()
+            .is_empty());
 
-        // We won't accept to process a Cancel just yet
-        let msg = Sig {
-            signatures: BTreeMap::new(),
-            txid: cancel.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
+        // If they send the signatures for the same vault again, we'll ACK immediately.
         assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("received a Cancel")
-        );
-
-        let sighash = unemer
-            .signature_hash(0, SigHashType::AllPlusAnyoneCanPay)
-            .unwrap();
-        let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
-            [..2]
-            .iter()
-            .map(|xpriv| {
-                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
-                (
-                    privkey.private_key.public_key(&secp_ctx).key,
-                    secp_ctx.sign(&sighash, &privkey.private_key.key),
-                )
-            })
-            .collect();
-        let msg = Sig {
-            signatures,
-            txid: unemer.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("Revault transaction finalisation error")
-        );
-
-        // Enough sigs, but invalid signature type
-        let bad_sighash = unemer.signature_hash(0, SigHashType::All).unwrap();
-        let bad_sighash = secp256k1::Message::from_slice(&bad_sighash).unwrap();
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
-            .iter()
-            .map(|xpriv| {
-                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
-                (
-                    privkey.private_key.public_key(&secp_ctx).key,
-                    secp_ctx.sign(&bad_sighash, &privkey.private_key.key),
-                )
-            })
-            .collect();
-        let msg = Sig {
-            signatures,
-            txid: unemer.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid signature")
-        );
-
-        // Enough invalid sigs
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
-            .iter()
-            .map(|xpriv| {
-                let privkey = xpriv
-                    .derive_priv(&secp_ctx, &[derivation_index.increment().unwrap()])
-                    .unwrap();
-                (
-                    privkey.private_key.public_key(&secp_ctx).key,
-                    secp_ctx.sign(&sighash, &privkey.private_key.key),
-                )
-            })
-            .collect();
-        let msg = Sig {
-            signatures,
-            txid: unemer.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("Miniscript Error: could not satisfy")
-        );
-
-        // Enough *valid* sigs, UnvaultEmer sigs are now stored.
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
-            .iter()
-            .map(|xpriv| {
-                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
-                (
-                    privkey.private_key.public_key(&secp_ctx).key,
-                    secp_ctx.sign(&sighash, &privkey.private_key.key),
-                )
-            })
-            .collect();
-        let msg = Sig {
-            signatures,
-            txid: unemer.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert_eq!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx).unwrap(),
-            SigResult {
-                ack: true,
-                txid: unemer.txid()
-            }
-        );
-        let vault = db_vault(&db_path, &deposit_outpoint).unwrap().unwrap();
-        assert_eq!(vault.delegated, false);
-        assert_eq!(
-            db_unvault_emergency_signatures(&db_path, vault.id)
-                .unwrap()
-                .len(),
-            stakeholders.len()
-        );
-
-        // We won't accept it twice
-        let msg = Sig {
-            signatures: BTreeMap::new(),
-            txid: unemer.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("received an UnvaultEmergency")
-        );
-
-        // We would still accept to process an Emergency, though
-        let msg = Sig {
-            signatures: BTreeMap::new(),
-            txid: emer.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
+            process_sigs_message(&db_path, &scripts_config, &bitcoind, msg.clone(), &secp_ctx)
                 .unwrap()
                 .ack
-        );
-
-        let sighash = cancel
-            .signature_hash(0, SigHashType::AllPlusAnyoneCanPay)
-            .unwrap();
-        let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
-            [..2]
-            .iter()
-            .map(|xpriv| {
-                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
-                (
-                    privkey.private_key.public_key(&secp_ctx).key,
-                    secp_ctx.sign(&sighash, &privkey.private_key.key),
-                )
-            })
-            .collect();
-        let msg = Sig {
-            signatures,
-            txid: cancel.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("Revault transaction finalisation error")
-        );
-
-        // Enough sigs, but invalid signature type
-        let bad_sighash = cancel.signature_hash(0, SigHashType::All).unwrap();
-        let bad_sighash = secp256k1::Message::from_slice(&bad_sighash).unwrap();
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
-            .iter()
-            .map(|xpriv| {
-                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
-                (
-                    privkey.private_key.public_key(&secp_ctx).key,
-                    secp_ctx.sign(&bad_sighash, &privkey.private_key.key),
-                )
-            })
-            .collect();
-        let msg = Sig {
-            signatures,
-            txid: cancel.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("Invalid signature")
-        );
-
-        // Enough invalid sigs
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
-            .iter()
-            .map(|xpriv| {
-                let privkey = xpriv
-                    .derive_priv(&secp_ctx, &[derivation_index.increment().unwrap()])
-                    .unwrap();
-                (
-                    privkey.private_key.public_key(&secp_ctx).key,
-                    secp_ctx.sign(&sighash, &privkey.private_key.key),
-                )
-            })
-            .collect();
-        let msg = Sig {
-            signatures,
-            txid: cancel.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
-                .unwrap_err()
-                .to_string()
-                .contains("Miniscript Error: could not satisfy")
-        );
-
-        // Enough *valid* sigs, Cancel sigs are now stored.
-        let signatures: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
-            .iter()
-            .map(|xpriv| {
-                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
-                (
-                    privkey.private_key.public_key(&secp_ctx).key,
-                    secp_ctx.sign(&sighash, &privkey.private_key.key),
-                )
-            })
-            .collect();
-        let msg = Sig {
-            signatures,
-            txid: cancel.txid(),
-            deposit_outpoint,
-            derivation_index,
-        };
-        assert_eq!(
-            process_sig_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx).unwrap(),
-            SigResult {
-                ack: true,
-                txid: cancel.txid()
-            }
-        );
-        let vault = db_vault(&db_path, &deposit_outpoint).unwrap().unwrap();
-        assert!(vault.delegated);
-        assert_eq!(
-            db_cancel_signatures(&db_path, vault.id).unwrap().len(),
-            stakeholders.len()
         );
 
         // Done: remove the db
