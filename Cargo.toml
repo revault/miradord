@@ -5,8 +5,8 @@ authors = ["Antoine Poinsot <darosior@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
-revault_tx = { version = "0.4.0", features = ["use-serde"] }
-revault_net = "0.2.0"
+revault_tx = { git = "https://github.com/revault/revault_tx", features = ["use-serde"] }
+revault_net = { git = "https://github.com/revault/revault_net" }
 
 # Don't reinvent the wheel
 dirs = "3.0"

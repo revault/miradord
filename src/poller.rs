@@ -5,7 +5,7 @@ use crate::{
     },
     config::Config,
     database::{
-        db_cancel_signatures, db_del_vault, db_delegated_vaults, db_instance,
+        db_cancel_signatures, db_del_vault, db_blank_vaults, db_instance,
         db_should_cancel_vault, db_should_not_cancel_vault, db_unvault_spender_confirmed,
         db_unvaulted_vaults, db_update_tip, db_vault, schema::DbVault, DatabaseError,
     },
@@ -263,7 +263,7 @@ fn revault(
     Ok(())
 }
 
-// Poll bitcoind for new Unvault UTxO of delegated vaults we are watching. Return info about each
+// Poll bitcoind for new Unvault UTxO of vaults we are watching. Return info about each
 // new Unvault attempt.
 fn check_for_unvault(
     db_path: &path::Path,
@@ -272,7 +272,7 @@ fn check_for_unvault(
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
 ) -> Result<Vec<VaultInfo>, PollerError> {
-    let deleg_vaults = db_delegated_vaults(db_path)?;
+    let deleg_vaults = db_blank_vaults(db_path)?;
     let mut new_attempts = vec![];
 
     for db_vault in deleg_vaults {

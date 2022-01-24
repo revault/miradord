@@ -31,9 +31,7 @@ CREATE TABLE instances (
 
 /* All the vaults we are watching, with necessary information to be able to derive
  * the transaction chain. A new entry is always created with the registration of the
- * Emergency transaction signatures in the 'signatures' table. If 'delegated' is set
- * to 1 it means that the Cancel and UnvaultEmergency signatures are present as well
- * and that we need to be watching for an Unvault transaction broadcast.
+ * Emergency transaction signatures in the 'signatures' table.
  * 'should_cancel' is a ternary indicating whether:
  *  - We should revault a triggered Unvault (1)
  *  - We should let a triggered Unvault pass through (0)
@@ -48,7 +46,6 @@ CREATE TABLE vaults (
     deposit_vout INTEGER NOT NULL,
     derivation_index INTEGER NOT NULL,
     amount INTEGER NOT NULL,
-    delegated INTEGER NOT NULL CHECK (delegated IN (0,1)),
     should_cancel INTEGER CHECK (should_cancel IN (NULL, 0,1)),
     unvault_height INTEGER,
     spent_height INTEGER,
@@ -137,7 +134,6 @@ pub struct DbVault {
     pub deposit_outpoint: OutPoint,
     pub derivation_index: bip32::ChildNumber,
     pub amount: Amount,
-    pub delegated: bool,
     pub should_cancel: Option<bool>,
     pub unvault_height: Option<i32>,
     pub spent_height: Option<i32>,
@@ -167,11 +163,10 @@ impl TryFrom<&rusqlite::Row<'_>> for DbVault {
         assert!(amount > 0, "Insane db: negative vault amount");
         let amount = Amount::from_sat(amount as u64);
 
-        let delegated = row.get(6)?;
-        let should_cancel: Option<bool> = row.get(7)?;
+        let should_cancel: Option<bool> = row.get(6)?;
 
-        let unvault_height: Option<i32> = row.get(8)?;
-        let spent_height: Option<i32> = row.get(9)?;
+        let unvault_height: Option<i32> = row.get(7)?;
+        let spent_height: Option<i32> = row.get(8)?;
 
         Ok(DbVault {
             id,
@@ -179,7 +174,6 @@ impl TryFrom<&rusqlite::Row<'_>> for DbVault {
             deposit_outpoint,
             derivation_index,
             amount,
-            delegated,
             should_cancel,
             unvault_height,
             spent_height,
