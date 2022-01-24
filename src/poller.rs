@@ -5,9 +5,9 @@ use crate::{
     },
     config::Config,
     database::{
-        db_cancel_signatures, db_del_vault, db_blank_vaults, db_instance,
-        db_should_cancel_vault, db_should_not_cancel_vault, db_unvault_spender_confirmed,
-        db_unvaulted_vaults, db_update_tip, db_vault, schema::DbVault, DatabaseError,
+        db_blank_vaults, db_cancel_signatures, db_del_vault, db_instance, db_should_cancel_vault,
+        db_should_not_cancel_vault, db_unvault_spender_confirmed, db_unvaulted_vaults,
+        db_update_tip, db_vault, schema::DbVault, DatabaseError,
     },
     plugins::{NewBlockInfo, VaultInfo},
 };
@@ -219,32 +219,30 @@ fn revault(
     .expect("Can only fail if we have an insane feebumping input");
 
     for db_sig in db_cancel_signatures(db_path, db_vault.id)? {
-        if let Err(e) = cancel_tx.add_cancel_sig(db_sig.pubkey, db_sig.signature, secp) {
-            log::error!(
-                "Error adding signature '{:?}' to Cancel transaction '{}': '{:?}'",
-                db_sig,
-                cancel_tx,
-                e
-            );
-        } else {
-            log::trace!(
-                "Added signature '{:?}' to Cancel transaction '{}'",
-                db_sig,
-                cancel_tx
-            );
-        }
+        cancel_tx
+            .add_cancel_sig(db_sig.pubkey, db_sig.signature, secp)
+            .unwrap_or_else(|e| {
+                // Checked before adding signatures to the DB.
+                panic!(
+                    "Error adding signature '{:?}' to Cancel transaction '{}': '{:?}'",
+                    db_sig, cancel_tx, e
+                );
+            });
+        log::trace!(
+            "Added signature '{:?}' to Cancel transaction '{}'",
+            db_sig,
+            cancel_tx
+        );
     }
 
-    if let Err(e) = cancel_tx.finalize(secp) {
-        log::error!(
+    cancel_tx.finalize(secp).unwrap_or_else(|e|
+        // Checked before registering the vault in DB.
+        panic!(
             "Error finalizing Cancel transaction '{}': '{:?}'",
             cancel_tx,
             e
-        );
-        return Ok(()); // Don't crash, though.
-    } else {
-        log::trace!("Finalized Cancel transaction '{}'", cancel_tx);
-    }
+        ));
+    log::trace!("Finalized Cancel transaction '{}'", cancel_tx);
 
     let cancel_tx = cancel_tx.into_tx();
     if let Err(e) = bitcoind.broadcast_tx(&cancel_tx) {
