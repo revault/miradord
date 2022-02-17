@@ -13,10 +13,10 @@ use revault_net::{
 };
 use revault_tx::{
     bitcoin::{secp256k1, OutPoint},
-    transactions::{transaction_chain, RevaultTransaction},
+    transactions::{transaction_chain, RevaultPresignedTransaction, RevaultTransaction},
 };
 
-use std::{io, net::TcpListener, path, sync};
+use std::{collections::BTreeMap, io, net::TcpListener, path, sync};
 
 #[derive(Debug)]
 pub enum ListenerError {
@@ -82,7 +82,7 @@ fn process_sigs_message<C: secp256k1::Verification>(
     let deposit_utxo = bitcoind
         .utxoinfo(&msg.deposit_outpoint)
         .ok_or(ListenerError::UnknownOutpoint(msg.deposit_outpoint))?;
-    let (_, mut cancel_tx, mut emer_tx, mut unemer_tx) = transaction_chain(
+    let (_, cancel_batch, mut emer_tx, mut unemer_tx) = transaction_chain(
         msg.deposit_outpoint,
         deposit_utxo.value,
         &scripts_config.deposit_descriptor,
@@ -90,9 +90,9 @@ fn process_sigs_message<C: secp256k1::Verification>(
         &scripts_config.cpfp_descriptor,
         msg.derivation_index,
         scripts_config.emergency_address.clone(),
-        0, /* FIXME: remove from API */
         secp,
     )?;
+    let mut cancel_tx = cancel_batch.into_feerate_20();
 
     // If we already have it, just acknowledge it.
     if db_vault(db_path, &msg.deposit_outpoint)?.is_some() {
@@ -113,17 +113,20 @@ fn process_sigs_message<C: secp256k1::Verification>(
             },
         ..
     } = msg;
+    let cancel_sigs = cancel
+        .into_values()
+        .next()
+        .unwrap_or_else(|| BTreeMap::new()); // FIXME
     for (key, sig) in emergency.iter() {
-        // Note this checks for ALL|ACP.
-        emer_tx.add_emer_sig(*key, *sig, secp)?;
+        emer_tx.add_sig(*key, *sig, secp)?;
     }
     emer_tx.finalize(secp)?;
-    for (key, sig) in cancel.iter() {
-        cancel_tx.add_cancel_sig(*key, *sig, secp)?;
+    for (key, sig) in cancel_sigs.iter() {
+        cancel_tx.add_sig(*key, *sig, secp)?;
     }
     cancel_tx.finalize(secp)?;
     for (key, sig) in unvault_emergency.iter() {
-        unemer_tx.add_emer_sig(*key, *sig, secp)?;
+        unemer_tx.add_sig(*key, *sig, secp)?;
     }
     unemer_tx.finalize(secp)?;
 
@@ -133,7 +136,7 @@ fn process_sigs_message<C: secp256k1::Verification>(
         msg.derivation_index,
         deposit_utxo.value,
         &emergency,
-        &cancel,
+        &cancel_sigs,
         &unvault_emergency,
     )?;
     log::debug!("Registered a new vault at '{}'", &msg.deposit_outpoint);
@@ -157,8 +160,15 @@ pub fn listener_main(
     // There is only going to be a small amount of ephemeral connections, there is no need for
     // complexity so just sequentially process each message.
     loop {
+        let (connection, _) = match listener.accept() {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("Accepting new connection: '{}'", e);
+                continue;
+            }
+        };
         let mut kk_stream = match revault_net::transport::KKTransport::accept(
-            &listener,
+            connection,
             noise_privkey,
             &[config.stakeholder_noise_key],
         ) {
@@ -236,10 +246,12 @@ mod tests {
             setup_db,
         },
     };
+    use revault_net::message::watchtower::CancelFeerate;
     use revault_tx::{
-        bitcoin::{util::bip32, Address, Amount, Network, SigHashType},
+        bitcoin::{util::bip32, Address, Amount, Network},
         miniscript::descriptor::{DescriptorPublicKey, DescriptorXKey, Wildcard},
         scripts::{CpfpDescriptor, DepositDescriptor, EmergencyAddress, UnvaultDescriptor},
+        transactions::RevaultPresignedTransaction,
     };
 
     fn get_random_privkey(rng: &mut fastrand::Rng) -> bip32::ExtendedPrivKey {
@@ -436,7 +448,7 @@ mod tests {
         .unwrap();
         let deposit_value = Amount::from_sat(8765432);
         let derivation_index = bip32::ChildNumber::from(45678);
-        let (_, cancel_tx, emer_tx, unemer_tx) = transaction_chain(
+        let (_, cancel_batch, emer_tx, unemer_tx) = transaction_chain(
             deposit_outpoint,
             deposit_value,
             &scripts_config.deposit_descriptor,
@@ -444,18 +456,16 @@ mod tests {
             &scripts_config.cpfp_descriptor,
             derivation_index,
             scripts_config.emergency_address.clone(),
-            0,
             &secp_ctx,
         )
         .unwrap();
+        let cancel_tx = cancel_batch.into_feerate_20();
 
         // This starts a dummy server to answer our gettxout requests
         let bitcoind = sync::Arc::from(dummy_bitcoind(deposit_value));
 
         // Not enough emergency signatures
-        let sighash = emer_tx
-            .signature_hash(0, SigHashType::AllPlusAnyoneCanPay)
-            .unwrap();
+        let sighash = emer_tx.sig_hash().unwrap();
         let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
         let emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
             [..2]
@@ -468,7 +478,7 @@ mod tests {
                 )
             })
             .collect();
-        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = BTreeMap::new();
+        let cancel: BTreeMap<_, _> = BTreeMap::new();
         let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
             BTreeMap::new();
         let signatures = Signatures {
@@ -488,8 +498,8 @@ mod tests {
                 .contains("Revault transaction finalisation error")
         );
 
-        // Enough emergency sigs, but invalid signature type
-        let bad_sighash = emer_tx.signature_hash(0, SigHashType::All).unwrap();
+        // Enough emergency sigs, but invalid signature
+        let bad_sighash = [0; 32];
         let bad_sighash = secp256k1::Message::from_slice(&bad_sighash).unwrap();
         let emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
             .iter()
@@ -501,7 +511,7 @@ mod tests {
                 )
             })
             .collect();
-        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = BTreeMap::new();
+        let cancel: BTreeMap<_, _> = BTreeMap::new();
         let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
             BTreeMap::new();
         let signatures = Signatures {
@@ -518,7 +528,7 @@ mod tests {
             process_sigs_message(&db_path, &scripts_config, &bitcoind, msg, &secp_ctx)
                 .unwrap_err()
                 .to_string()
-                .contains("Invalid signature")
+                .contains("Invalid signature"),
         );
 
         // Enough invalid emergency sigs
@@ -535,7 +545,7 @@ mod tests {
                 )
             })
             .collect();
-        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = BTreeMap::new();
+        let cancel: BTreeMap<_, _> = BTreeMap::new();
         let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
             BTreeMap::new();
         let signatures = Signatures {
@@ -571,11 +581,10 @@ mod tests {
         // Now do the same dance with Cancel signatures.
 
         // Not enough Cancel signatures
-        let sighash = cancel_tx
-            .signature_hash(0, SigHashType::AllPlusAnyoneCanPay)
-            .unwrap();
+        let sighash = cancel_tx.sig_hash().unwrap();
         let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
-        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv[..2]
+        let cancel_sigs: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+            [..2]
             .iter()
             .map(|xpriv| {
                 let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
@@ -585,6 +594,8 @@ mod tests {
                 )
             })
             .collect();
+        let cancel =
+            IntoIterator::into_iter([(CancelFeerate(Amount::from_sat(20)), cancel_sigs)]).collect();
         let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
             BTreeMap::new();
         let signatures = Signatures {
@@ -604,10 +615,10 @@ mod tests {
                 .contains("Revault transaction finalisation error"),
         );
 
-        // Enough Cancel sigs, but invalid signature type
-        let bad_sighash = cancel_tx.signature_hash(0, SigHashType::All).unwrap();
+        // Enough Cancel sigs, but invalid signature
+        let bad_sighash = [0; 32];
         let bad_sighash = secp256k1::Message::from_slice(&bad_sighash).unwrap();
-        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+        let cancel_sigs: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
             .iter()
             .map(|xpriv| {
                 let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
@@ -617,6 +628,8 @@ mod tests {
                 )
             })
             .collect();
+        let cancel =
+            IntoIterator::into_iter([(CancelFeerate(Amount::from_sat(20)), cancel_sigs)]).collect();
         let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
             BTreeMap::new();
         let signatures = Signatures {
@@ -637,7 +650,7 @@ mod tests {
         );
 
         // Enough invalid Cancel sigs
-        let cancel: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+        let cancel_sigs: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
             .iter()
             .map(|xpriv| {
                 // Note the derivation index increment
@@ -650,6 +663,8 @@ mod tests {
                 )
             })
             .collect();
+        let cancel =
+            IntoIterator::into_iter([(CancelFeerate(Amount::from_sat(20)), cancel_sigs)]).collect();
         let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
             BTreeMap::new();
         let signatures = Signatures {
@@ -670,23 +685,25 @@ mod tests {
         );
 
         // Valid Cancel signatures.
-        let cancel_valid: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
-            .iter()
-            .map(|xpriv| {
-                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
-                (
-                    privkey.private_key.public_key(&secp_ctx).key,
-                    secp_ctx.sign(&sighash, &privkey.private_key.key),
-                )
-            })
-            .collect();
+        let cancel_valid_sigs: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            stakeholders_priv
+                .iter()
+                .map(|xpriv| {
+                    let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
+                    (
+                        privkey.private_key.public_key(&secp_ctx).key,
+                        secp_ctx.sign(&sighash, &privkey.private_key.key),
+                    )
+                })
+                .collect();
+        let cancel_valid: BTreeMap<_, _> =
+            IntoIterator::into_iter([(CancelFeerate(Amount::from_sat(20)), cancel_valid_sigs)])
+                .collect();
 
         // Now do the same dance with Unvault Emergency signatures.
 
         // Not enough UnEmer signatures
-        let sighash = unemer_tx
-            .signature_hash(0, SigHashType::AllPlusAnyoneCanPay)
-            .unwrap();
+        let sighash = unemer_tx.sig_hash().unwrap();
         let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
         let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
             stakeholders_priv[..2]
@@ -716,8 +733,8 @@ mod tests {
                 .contains("Revault transaction finalisation error")
         );
 
-        // Enough UnEmer sigs, but invalid signature type
-        let bad_sighash = unemer_tx.signature_hash(0, SigHashType::All).unwrap();
+        // Enough UnEmer sigs, but invalid signature
+        let bad_sighash = [0; 32];
         let bad_sighash = secp256k1::Message::from_slice(&bad_sighash).unwrap();
         let unvault_emergency: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
             stakeholders_priv

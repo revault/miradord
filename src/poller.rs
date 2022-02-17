@@ -12,9 +12,11 @@ use crate::{
     plugins::{NewBlockInfo, VaultInfo},
 };
 use revault_tx::{
-    bitcoin::{consensus::encode, secp256k1, OutPoint},
+    bitcoin::{consensus::encode, secp256k1, Amount, OutPoint},
     scripts::{DerivedCpfpDescriptor, DerivedDepositDescriptor, DerivedUnvaultDescriptor},
-    transactions::{CancelTransaction, RevaultTransaction, UnvaultTransaction},
+    transactions::{
+        CancelTransaction, RevaultPresignedTransaction, RevaultTransaction, UnvaultTransaction,
+    },
     txins::{DepositTxIn, RevaultTxIn, UnvaultTxIn},
     txouts::DepositTxOut,
 };
@@ -92,12 +94,7 @@ fn unvault_tx(
 ) -> Result<UnvaultTransaction, revault_tx::error::TransactionCreationError> {
     let deposit_txo = DepositTxOut::new(db_vault.amount, deposit_desc);
     let deposit_txin = DepositTxIn::new(db_vault.deposit_outpoint, deposit_txo);
-    UnvaultTransaction::new(
-        deposit_txin,
-        &unvault_desc,
-        &cpfp_desc,
-        /* FIXME: remove from the API */ 0,
-    )
+    UnvaultTransaction::new(deposit_txin, &unvault_desc, &cpfp_desc)
 }
 
 // The database updates we cache to avoid partial write in case the chain tip moved
@@ -263,17 +260,13 @@ fn revault(
     unvault_txin: UnvaultTxIn,
     deposit_desc: &DerivedDepositDescriptor,
 ) -> Result<(), PollerError> {
-    let mut cancel_tx = CancelTransaction::new(
-        unvault_txin,
-        None,
-        &deposit_desc,
-        /* FIXME: remove from the API */ 0,
-    )
-    .expect("Can only fail if we have an insane feebumping input");
+    // TODO: choose the appropriate one based on feerate
+    let mut cancel_tx = CancelTransaction::new(unvault_txin, &deposit_desc, Amount::from_sat(5))
+        .expect("Can only fail if we have an insane feebumping input");
 
     for db_sig in db_cancel_signatures(db_path, db_vault.id)? {
         cancel_tx
-            .add_cancel_sig(db_sig.pubkey, db_sig.signature, secp)
+            .add_sig(db_sig.pubkey, db_sig.signature, secp)
             .unwrap_or_else(|e| {
                 // Checked before adding signatures to the DB.
                 panic!(

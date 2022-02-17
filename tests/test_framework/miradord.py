@@ -215,7 +215,9 @@ class Miradord(TailableProc):
         params = {
             "signatures": {
                 "emergency": emer_sigs,
-                "cancel": cancel_sigs,
+                "cancel": {
+                    "20": cancel_sigs,
+                },
                 "unvault_emergency": unemer_sigs,
             },
             "deposit_outpoint": deposit_outpoint,
