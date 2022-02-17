@@ -32,29 +32,21 @@ impl fmt::Display for PluginError {
             Self::NotExecutable(p) => {
                 write!(f, "Plugin '{}' is not executable", p.to_string_lossy())
             }
-            Self::Exec(p, e) => {
-                write!(
-                    f,
-                    "Plugin '{}' execution error: '{}'",
-                    p.to_string_lossy(),
-                    e
-                )
-            }
-            Self::Write(p, e) => {
-                write!(f, "Plugin '{}' write error: '{}'", p.to_string_lossy(), e)
-            }
-            Self::Read(p, e) => {
-                write!(f, "Plugin '{}' read error: '{}'", p.to_string_lossy(), e)
-            }
-            Self::Termination(p, c, stderr) => {
-                write!(
-                    f,
-                    "Plugin '{}' terminated with error code '{:?}', stderr: '{}'",
-                    p.to_string_lossy(),
-                    c,
-                    String::from_utf8_lossy(&stderr)
-                )
-            }
+            Self::Exec(p, e) => write!(
+                f,
+                "Plugin '{}' execution error: '{}'",
+                p.to_string_lossy(),
+                e
+            ),
+            Self::Write(p, e) => write!(f, "Plugin '{}' write error: '{}'", p.to_string_lossy(), e),
+            Self::Read(p, e) => write!(f, "Plugin '{}' read error: '{}'", p.to_string_lossy(), e),
+            Self::Termination(p, c, stderr) => write!(
+                f,
+                "Plugin '{}' terminated with error code '{:?}', stderr: '{}'",
+                p.to_string_lossy(),
+                c,
+                String::from_utf8_lossy(&stderr)
+            ),
             Self::Deserialization(p, e) => write!(
                 f,
                 "Plugin '{}' stdout deserialization error: '{}'",
