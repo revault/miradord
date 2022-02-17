@@ -19,7 +19,7 @@ use revault_tx::{
     txouts::DepositTxOut,
 };
 
-use std::{convert::TryInto, path, thread};
+use std::{collections::HashMap, convert::TryInto, path, thread};
 
 /// How many blocks are we waiting to consider a consumed vault irreversably spent
 const REORG_WATCH_LIMIT: i32 = 288;
@@ -27,6 +27,7 @@ const REORG_WATCH_LIMIT: i32 = 288;
 /// An error happened in the main loop
 #[derive(Debug)]
 pub enum PollerError {
+    TipChanged,
     Database(DatabaseError),
     Bitcoind(BitcoindError),
 }
@@ -36,6 +37,10 @@ impl std::fmt::Display for PollerError {
         match self {
             Self::Database(ref e) => write!(f, "Database error in main loop: '{}'", e),
             Self::Bitcoind(ref e) => write!(f, "Bitcoind error in main loop: '{}'", e),
+            Self::TipChanged => write!(
+                f,
+                "The bitcoind best tip changed while we were processing the new block"
+            ),
         }
     }
 }
@@ -95,6 +100,18 @@ fn unvault_tx(
     )
 }
 
+#[derive(Default, Debug)]
+struct DbUpdates {
+    // vault_id, unvault_height
+    pub should_cancel: Vec<(i64, i32)>,
+    // vault_id -> DbVault
+    pub new_unvaulted: HashMap<i64, DbVault>,
+    // vault_id
+    pub to_be_deleted: Vec<i64>,
+    // vault_id, confirmed height
+    pub spender_confirmed: Vec<(i64, i32)>,
+}
+
 struct UpdatedVaults {
     pub successful_attempts: Vec<OutPoint>,
     pub revaulted_attempts: Vec<OutPoint>,
@@ -106,8 +123,18 @@ fn manage_unvaulted_vaults(
     config: &Config,
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
+    db_updates: &mut DbUpdates,
 ) -> Result<UpdatedVaults, PollerError> {
-    let unvaulted_vaults = db_unvaulted_vaults(db_path)?;
+    let mut unvaulted_vaults = db_unvaulted_vaults(db_path)?;
+    // We don't have all the unvaulted_vaults in db, some of them are
+    // in our db_updates
+    let mut new_unvaulted_vaults = db_updates
+        .new_unvaulted
+        .clone()
+        .values()
+        .map(|v| v.clone())
+        .collect::<Vec<_>>();
+    unvaulted_vaults.append(&mut new_unvaulted_vaults);
     let mut updated_vaults = UpdatedVaults {
         successful_attempts: vec![],
         revaulted_attempts: vec![],
@@ -129,7 +156,7 @@ fn manage_unvaulted_vaults(
         // Don't do anything if the Unvault is still unspent. TODO: re-bumping
         if bitcoind.utxoinfo(&unvault_outpoint).is_some() {
             if bitcoind.chain_tip().hash != current_tip.hash {
-                // TODO
+                return Err(PollerError::TipChanged);
             }
             log::debug!(
                 "Unvault transaction '{}' for vault at '{}' is still unspent at height '{}'",
@@ -151,7 +178,7 @@ fn manage_unvaulted_vaults(
                 .checked_sub(conf_height)
                 .expect("Impossible, the confirmation height is always <= tip");
             if n_confs > REORG_WATCH_LIMIT {
-                db_del_vault(db_path, db_vault.id)?;
+                db_updates.to_be_deleted.push(db_vault.id);
                 log::info!(
                     "Forgetting about consumed vault at '{}' after its spending transaction \
                      had at least '{}' confirmations.",
@@ -195,7 +222,9 @@ fn manage_unvaulted_vaults(
         }
 
         // Note we set the current tip height as spent height, no harm in overestimating this.
-        db_unvault_spender_confirmed(db_path, db_vault.id, current_tip.height)?;
+        db_updates
+            .spender_confirmed
+            .push((db_vault.id, current_tip.height));
     }
 
     Ok(updated_vaults)
@@ -269,11 +298,12 @@ fn check_for_unvault(
     config: &Config,
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
+    db_updates: &mut DbUpdates,
 ) -> Result<Vec<VaultInfo>, PollerError> {
     let deleg_vaults = db_blank_vaults(db_path)?;
     let mut new_attempts = vec![];
 
-    for db_vault in deleg_vaults {
+    for mut db_vault in deleg_vaults {
         let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &db_vault);
         let unvault_tx = match unvault_tx(&db_vault, &deposit_desc, &unvault_desc, &cpfp_desc) {
             Ok(tx) => tx,
@@ -287,7 +317,7 @@ fn check_for_unvault(
 
         if let Some(utxoinfo) = bitcoind.utxoinfo(&unvault_txin.outpoint()) {
             if current_tip.hash != utxoinfo.bestblock {
-                // TODO
+                return Err(PollerError::TipChanged);
             }
             let confs: i32 = utxoinfo
                 .confirmations
@@ -301,8 +331,9 @@ fn check_for_unvault(
                 utxoinfo
             );
 
+            db_vault.unvault_height = Some(unvault_height);
             // If needed to be canceled it will be marked as such when plugins tell us so.
-            db_should_not_cancel_vault(db_path, db_vault.id, unvault_height)?;
+            db_updates.new_unvaulted.insert(db_vault.id, db_vault);
             let vault_info = VaultInfo {
                 value: db_vault.amount,
                 deposit_outpoint: db_vault.deposit_outpoint,
@@ -317,14 +348,14 @@ fn check_for_unvault(
 
 // Poll each of our plugins for vaults to be revaulted given the updates to our vaults' state
 // (which might be an empty set) in the latest block.
-fn maybe_revault(
+fn get_vaults_to_revault(
     db_path: &path::Path,
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
     config: &Config,
-    bitcoind: &BitcoinD,
     block_height: i32,
     block_info: &NewBlockInfo,
-) -> Result<(), PollerError> {
+    db_updates: &mut DbUpdates,
+) -> Result<Vec<(DbVault, UnvaultTxIn, DerivedDepositDescriptor)>, PollerError> {
     let outpoints_to_revault = config
         .plugins
         .iter()
@@ -337,42 +368,77 @@ fn maybe_revault(
                 }
             };
             to_revault
-        });
+        })
+        .into_iter()
+        .map(|outpoint| db_vault(db_path, &outpoint))
+        .collect::<Result<Vec<Option<DbVault>>, _>>()?
+        .into_iter()
+        .filter_map(|v| {
+            match v {
+                Some(v) => {
+                    // The unvault height might not be here, as we still haven't updated
+                    // the db. Look into db_updates if we have it, just in case
+                    let unvault_height = v.unvault_height.or_else(|| {
+                        db_updates
+                            .new_unvaulted
+                            .get(&v.id)
+                            .map(|v| v.unvault_height)
+                            .flatten()
+                    });
+                    if let Some(unvault_height) = unvault_height {
+                        let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &v);
+                        let unvault_tx =
+                            match unvault_tx(&v, &deposit_desc, &unvault_desc, &cpfp_desc) {
+                                Ok(tx) => tx,
+                                Err(e) => {
+                                    // TODO: handle dust better (they should never send us dust vaults though)
+                                    log::error!(
+                                        "Unexpected error deriving Unvault transaction: '{}'",
+                                        e
+                                    );
+                                    return None;
+                                }
+                            };
+                        let unvault_txin = unvault_tx.revault_unvault_txin(&unvault_desc);
 
-    for deposit_outpoint in outpoints_to_revault {
-        if let Some(db_vault) = db_vault(db_path, &deposit_outpoint)? {
-            let unvault_height = match db_vault.unvault_height {
-                Some(h) => h,
+                        db_updates.should_cancel.push((v.id, unvault_height));
+                        Some((v, unvault_txin, deposit_desc))
+                    } else {
+                        // FIXME: should we crash? This must never happen.
+                        log::error!("One of the plugins told us to revault a non-unvaulted vault");
+                        None
+                    }
+                }
                 None => {
-                    // FIXME: should we crash? This must never happen.
-                    log::error!("One of the plugins told us to revault a non-unvaulted vault");
-                    continue;
+                    log::error!("One of the plugins returned an inexistant outpoint.");
+                    None
                 }
-            };
-            let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &db_vault);
-            let unvault_tx = match unvault_tx(&db_vault, &deposit_desc, &unvault_desc, &cpfp_desc) {
-                Ok(tx) => tx,
-                Err(e) => {
-                    // TODO: handle dust better (they should never send us dust vaults though)
-                    log::error!("Unexpected error deriving Unvault transaction: '{}'", e);
-                    continue;
-                }
-            };
-            let unvault_txin = unvault_tx.revault_unvault_txin(&unvault_desc);
+            }
+        })
+        .collect();
 
-            db_should_cancel_vault(db_path, db_vault.id, unvault_height)?;
-            revault(
-                db_path,
-                secp,
-                bitcoind,
-                &db_vault,
-                unvault_txin,
-                &deposit_desc,
-            )?;
-        } else {
-            // FIXME: should we crash? This must never happen.
-            log::error!("One of the plugins returned an inexistant outpoint.");
-        }
+    Ok(outpoints_to_revault)
+}
+
+fn update_db(db_path: &path::Path, db_updates: DbUpdates) -> Result<(), PollerError> {
+    for (_, vault) in db_updates.new_unvaulted {
+        db_should_not_cancel_vault(
+            db_path,
+            vault.id,
+            vault.unvault_height.expect("We always set it"),
+        )?;
+    }
+
+    for (vault_id, unvault_height) in db_updates.should_cancel {
+        db_should_cancel_vault(db_path, vault_id, unvault_height)?;
+    }
+
+    for vault_id in db_updates.to_be_deleted {
+        db_del_vault(db_path, vault_id)?;
+    }
+
+    for (vault_id, height) in db_updates.spender_confirmed {
+        db_unvault_spender_confirmed(db_path, vault_id, height)?;
     }
 
     Ok(())
@@ -389,6 +455,10 @@ fn new_block(
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
 ) -> Result<(), PollerError> {
+    // Storing everything we need to udpate in the db, so we can update it
+    // all in one batch at the end
+    let mut db_updates = DbUpdates::default();
+
     // Update the fee-bumping reserves estimates
     // TODO
 
@@ -396,13 +466,27 @@ fn new_block(
     // TODO
 
     // Any Unvault txo confirmed?
-    let new_attempts = check_for_unvault(db_path, secp, config, bitcoind, current_tip)?;
+    let new_attempts = check_for_unvault(
+        db_path,
+        secp,
+        config,
+        bitcoind,
+        current_tip,
+        &mut db_updates,
+    )?;
 
     // Any Cancel tx still unconfirmed? Any vault to forget about?
     let UpdatedVaults {
         successful_attempts,
         revaulted_attempts,
-    } = manage_unvaulted_vaults(db_path, secp, config, bitcoind, current_tip)?;
+    } = manage_unvaulted_vaults(
+        db_path,
+        secp,
+        config,
+        bitcoind,
+        current_tip,
+        &mut db_updates,
+    )?;
 
     // Any vault plugins tell us to revault?
     let new_blk_info = NewBlockInfo {
@@ -410,14 +494,6 @@ fn new_block(
         successful_attempts,
         revaulted_attempts,
     };
-    maybe_revault(
-        db_path,
-        secp,
-        config,
-        bitcoind,
-        current_tip.height,
-        &new_blk_info,
-    )?;
 
     // Any coin received on the FB wallet?
     // TODO
@@ -427,6 +503,35 @@ fn new_block(
 
     // Any consolidation to be processed given the current fee market?
     // TODO
+
+    let outpoints_to_revault = get_vaults_to_revault(
+        db_path,
+        secp,
+        config,
+        current_tip.height,
+        &new_blk_info,
+        &mut db_updates,
+    )?;
+
+    for (db_vault, unvault_txin, deposit_desc) in outpoints_to_revault {
+        revault(
+            db_path,
+            secp,
+            bitcoind,
+            &db_vault,
+            unvault_txin,
+            &deposit_desc,
+        )?;
+    }
+
+    update_db(&db_path, db_updates)?;
+    db_update_tip(db_path, current_tip.height, current_tip.hash)?;
+
+    log::debug!(
+        "Done processing block '{}' ({})",
+        current_tip.hash,
+        current_tip.height
+    );
 
     Ok(())
 }
@@ -447,13 +552,10 @@ pub fn main_loop(
                 panic!("No reorg handling yet");
             }
 
-            new_block(db_path, secp, config, bitcoind, &bitcoind_tip)?;
-            db_update_tip(db_path, bitcoind_tip.height, bitcoind_tip.hash)?;
-            log::debug!(
-                "Done processing block '{}' ({})",
-                bitcoind_tip.hash,
-                bitcoind_tip.height
-            );
+            match new_block(db_path, secp, config, bitcoind, &bitcoind_tip) {
+                Ok(()) | Err(PollerError::TipChanged) => {}
+                Err(e) => return Err(e),
+            }
         } else if bitcoind_tip.hash != db_instance.tip_blockhash {
             panic!("No reorg handling yet");
         }
