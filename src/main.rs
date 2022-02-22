@@ -76,17 +76,18 @@ fn setup_panic_hook() {
             .unwrap_or_else(|| "'unknown'".to_string());
 
         let bt = backtrace::Backtrace::new();
-        if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
-            log::error!(
-                "panic occurred at line {} of file {}: {:?}\n{:?}",
-                line,
-                file,
-                s,
-                bt
-            );
-        } else {
-            log::error!("panic occurred at line {} of file {}\n{:?}", line, file, bt);
-        }
+        let info = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic_info.payload().downcast_ref::<String>().cloned());
+        log::error!(
+            "panic occurred at line {} of file {}: {:?}\n{:?}",
+            line,
+            file,
+            info,
+            bt
+        );
 
         process::exit(1);
     }));
