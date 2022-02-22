@@ -59,6 +59,8 @@ CREATE TABLE vaults (
  * - 0: Emergency
  * - 1: UnvaultEmergency
  * - 2: Cancel
+ * The 'feerate' is in sat/vb. It is always set for Cancel transactions. It is
+ * never set for both Emergency transactions.
  */
 CREATE TABLE signatures (
     id INTEGER PRIMARY KEY NOT NULL,
@@ -66,6 +68,7 @@ CREATE TABLE signatures (
     tx_type INTEGER NOT NULL CHECK (tx_type IN (0,1,2)),
     pubkey BLOB NOT NULL,
     signature BLOB UNIQUE NOT NULL,
+    feerate INTEGER,
     FOREIGN KEY (vault_id) REFERENCES vaults (id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
@@ -210,6 +213,7 @@ pub struct DbSignature {
     pub tx_type: SigTxType,
     pub pubkey: secp256k1::PublicKey,
     pub signature: secp256k1::Signature,
+    pub feerate: Option<Amount>,
 }
 
 impl TryFrom<&rusqlite::Row<'_>> for DbSignature {
@@ -232,12 +236,16 @@ impl TryFrom<&rusqlite::Row<'_>> for DbSignature {
         let signature =
             secp256k1::Signature::from_der(&signature).expect("Insane db: non-DER signature");
 
+        let feerate: Option<u64> = row.get(5)?;
+        let feerate = feerate.map(Amount::from_sat);
+
         Ok(DbSignature {
             id,
             vault_id,
             tx_type,
             pubkey,
             signature,
+            feerate,
         })
     }
 }

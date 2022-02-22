@@ -261,10 +261,11 @@ fn revault(
     deposit_desc: &DerivedDepositDescriptor,
 ) -> Result<(), PollerError> {
     // TODO: choose the appropriate one based on feerate
-    let mut cancel_tx = CancelTransaction::new(unvault_txin, &deposit_desc, Amount::from_sat(5))
+    let feerate_vb = Amount::from_sat(20);
+    let mut cancel_tx = CancelTransaction::new(unvault_txin, &deposit_desc, feerate_vb / 4)
         .expect("Can only fail if we have an insane feebumping input");
 
-    for db_sig in db_cancel_signatures(db_path, db_vault.id)? {
+    for db_sig in db_cancel_signatures(db_path, db_vault.id, Some(feerate_vb))? {
         cancel_tx
             .add_sig(db_sig.pubkey, db_sig.signature, secp)
             .unwrap_or_else(|e| {

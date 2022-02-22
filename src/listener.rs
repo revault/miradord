@@ -114,7 +114,8 @@ fn process_sigs_message<C: secp256k1::Verification>(
         ..
     } = msg;
     let cancel_sigs = cancel
-        .into_values()
+        .values()
+        .cloned()
         .next()
         .unwrap_or_else(|| BTreeMap::new()); // FIXME
     for (key, sig) in emergency.iter() {
@@ -135,9 +136,11 @@ fn process_sigs_message<C: secp256k1::Verification>(
         &msg.deposit_outpoint,
         msg.derivation_index,
         deposit_utxo.value,
-        &emergency,
-        &cancel_sigs,
-        &unvault_emergency,
+        emergency,
+        cancel
+            .into_iter()
+            .map(|(feerate, sig_map)| (feerate.0, sig_map)),
+        unvault_emergency,
     )?;
     log::debug!("Registered a new vault at '{}'", &msg.deposit_outpoint);
 
@@ -826,7 +829,7 @@ mod tests {
         // And it becomes (as well as all rev sigs) queriable.
         assert!(db_vault(&db_path, &deposit_outpoint).unwrap().is_some());
         assert!(!db_emergency_signatures(&db_path, 1).unwrap().is_empty());
-        assert!(!db_cancel_signatures(&db_path, 1).unwrap().is_empty());
+        assert!(!db_cancel_signatures(&db_path, 1, None).unwrap().is_empty()); // TODO
         assert!(!db_unvault_emergency_signatures(&db_path, 1)
             .unwrap()
             .is_empty());

@@ -6,7 +6,7 @@ use revault_tx::{
 };
 use schema::{DbInstance, DbSignature, DbVault, SigTxType, SCHEMA};
 
-use std::{collections, convert::TryInto, fs, io, os::unix::fs::OpenOptionsExt, path, time};
+use std::{convert::TryInto, fs, io, os::unix::fs::OpenOptionsExt, path, time};
 
 use rusqlite::params;
 
@@ -147,17 +147,19 @@ pub fn db_update_tip(
 fn db_tx_insert_sigs(
     db_tx: &rusqlite::Transaction,
     vault_id: i64,
-    sigs: &collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>,
+    sigs: impl IntoIterator<Item = (secp256k1::PublicKey, secp256k1::Signature)>,
     tx_type: SigTxType,
+    feerate: Option<Amount>,
 ) -> Result<(), DatabaseError> {
     for (key, sig) in sigs {
         db_tx.execute(
-            "INSERT INTO signatures (vault_id, tx_type, pubkey, signature) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO signatures (vault_id, tx_type, pubkey, signature, feerate) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 vault_id,
                 tx_type as i64,
                 key.serialize().to_vec(),
-                sig.serialize_der().to_vec()
+                sig.serialize_der().to_vec(),
+                feerate.map(|a| a.as_sat())
             ],
         )?;
     }
@@ -166,23 +168,32 @@ fn db_tx_insert_sigs(
 }
 
 /// Register a new vault to be watched. Atomically inserts the vault and the Revocation signatures.
-pub fn db_new_vault(
+pub fn db_new_vault<F, S>(
     db_path: &path::Path,
     deposit_outpoint: &OutPoint,
     derivation_index: bip32::ChildNumber,
     amount: Amount,
-    emer_sigs: &collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>,
-    cancel_sigs: &collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>,
-    unemer_sigs: &collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>,
-) -> Result<(), DatabaseError> {
+    emer_sigs: S,
+    cancel_sigs_by_feerate: F,
+    unemer_sigs: S,
+) -> Result<(), DatabaseError>
+where
+    S: IntoIterator<Item = (secp256k1::PublicKey, secp256k1::Signature)>,
+    F: IntoIterator<Item = (Amount, S)>,
+{
     let instance_id = db_instance(db_path)?.id;
     let deposit_txid = deposit_outpoint.txid.to_vec();
     let deposit_vout = deposit_outpoint.vout;
     let deriv_index: u32 = derivation_index.into();
     let amount = amount_to_i64(&amount);
 
+    let mut emer_sigs = emer_sigs.into_iter().peekable();
+    let mut cancel_sigs_by_feerate = cancel_sigs_by_feerate.into_iter().peekable();
+    let mut unemer_sigs = unemer_sigs.into_iter().peekable();
     assert!(
-        emer_sigs.len() > 0 && cancel_sigs.len() > 0 && unemer_sigs.len() > 0,
+        emer_sigs.peek().is_some()
+            && cancel_sigs_by_feerate.peek().is_some()
+            && unemer_sigs.peek().is_some(),
         "Registering a vault with an empty set of signatures"
     );
 
@@ -194,9 +205,23 @@ pub fn db_new_vault(
         )?;
 
         let vault_id = db_tx.last_insert_rowid();
-        db_tx_insert_sigs(db_tx, vault_id, emer_sigs, SigTxType::Emergency)?;
-        db_tx_insert_sigs(db_tx, vault_id, cancel_sigs, SigTxType::Cancel)?;
-        db_tx_insert_sigs(db_tx, vault_id, unemer_sigs, SigTxType::UnvaultEmergency)?;
+        db_tx_insert_sigs(db_tx, vault_id, emer_sigs, SigTxType::Emergency, None)?;
+        for (feerate, cancel_sigs) in cancel_sigs_by_feerate {
+            db_tx_insert_sigs(
+                db_tx,
+                vault_id,
+                cancel_sigs,
+                SigTxType::Cancel,
+                Some(feerate),
+            )?;
+        }
+        db_tx_insert_sigs(
+            db_tx,
+            vault_id,
+            unemer_sigs,
+            SigTxType::UnvaultEmergency,
+            None,
+        )?;
 
         Ok(())
     })
@@ -302,7 +327,8 @@ pub fn db_unvaulted_vaults(db_path: &path::Path) -> Result<Vec<DbVault>, Databas
     )
 }
 
-// Internal helper for signature query boilerplate
+// Internal helpers for signature query boilerplate
+
 fn db_sigs_by_type(
     db_path: &path::Path,
     vault_id: i64,
@@ -312,6 +338,20 @@ fn db_sigs_by_type(
         db_path,
         "SELECT * FROM signatures WHERE vault_id = (?1) AND tx_type = (?2)",
         params![vault_id, tx_type as i64],
+        |row| row.try_into(),
+    )
+}
+
+fn db_sigs_by_type_and_feerate(
+    db_path: &path::Path,
+    vault_id: i64,
+    tx_type: SigTxType,
+    feerate: Amount,
+) -> Result<Vec<DbSignature>, DatabaseError> {
+    db_query(
+        db_path,
+        "SELECT * FROM signatures WHERE vault_id = (?1) AND tx_type = (?2) AND feerate = (?3)",
+        params![vault_id, tx_type as i64, feerate.as_sat()],
         |row| row.try_into(),
     )
 }
@@ -334,12 +374,17 @@ pub fn db_unvault_emergency_signatures(
     db_sigs_by_type(db_path, vault_id, SigTxType::UnvaultEmergency)
 }
 
-/// Get all the Cancel signatures of this vault
+/// Get all the Cancel signatures of this vault, optionally filtered by feerate
 pub fn db_cancel_signatures(
     db_path: &path::Path,
     vault_id: i64,
+    feerate: Option<Amount>,
 ) -> Result<Vec<DbSignature>, DatabaseError> {
-    db_sigs_by_type(db_path, vault_id, SigTxType::Cancel)
+    if let Some(feerate) = feerate {
+        db_sigs_by_type_and_feerate(db_path, vault_id, SigTxType::Cancel, feerate)
+    } else {
+        db_sigs_by_type(db_path, vault_id, SigTxType::Cancel)
+    }
 }
 
 // Create the db file with RW permissions only for the user
@@ -640,36 +685,75 @@ mod tests {
         .unwrap();
         let deriv_a = bip32::ChildNumber::from(32);
         let amount_a = Amount::from_sat(i64::MAX as u64 - 100_000);
-        let emer_sigs_a: collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = [
+        // NOTE: all those could have been nicely laid out static arrays... But rustc doesn't
+        // support iterating by value on arrays until 1.53, and our MSRV is 1.48.
+        let emer_sigs_a = vec![
             dummy_sig!(secp256k1::Signature::from_str("304402200b4025e855ac108cf4f5114c3a8af9f8122023ffa971c5de8a8bc3f67d18749902202cc9b7d36f57dbe70f8826fac13838c6757fe18fb4572328c76dd5b55e452528").unwrap()),
             dummy_sig!(secp256k1::Signature::from_str("3045022100cc110b2dc66b9a116f50c61548d33f589d00ef57fb2fa784100ffb84e1577faf02206eec4e600f76f347b2014752a3619df8b2406fa61a34f0ec01ce4900f0b22083").unwrap())
-        ].iter().copied().collect();
-        let unemer_sigs_a: collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = [
+        ];
+        let unemer_sigs_a = vec![
             dummy_sig!(secp256k1::Signature::from_str("30450221008f4abfaa7c22adbf621e46f520fea81779b4fce81c22889354f8044336a542ff02205b5bf7c7a677414fdf20f5192c51f0fd34a8447b709a5d0f7df6e6c8d5dfbeff").unwrap()),
             dummy_sig!(secp256k1::Signature::from_str("3045022100a1da27080b26a6a328a26dfe0c076931ea5e22ad06e31b867a2ccd11d57e912102203ccb9388e104e13a81bc02c700d214278541ff8da67f27359b7bbb0e6eea6a41").unwrap())
-        ].iter().copied().collect();
-        let cancel_sigs_a: collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = [
-            dummy_sig!(secp256k1::Signature::from_str("304502210089a1b4a09cafb8f26d6355c5ad51c686d8796d3a833945de35687085b1cd048e022068f6ac3fd4d3909f5d3cf93b0cf6538edfbafdd0b36d858c073e4b9b4137a027").unwrap()),
-            dummy_sig!(secp256k1::Signature::from_str("3044022009334cec178a66aef6a473fc9d7608cc2b53495d433920262ba50e8a2947bba202207a0eb002ebe2fc0774adbe9b28885d00758d3043497aae414884bbc8cf7c84dc").unwrap()),
-        ].iter().copied().collect();
+        ];
+        let cancel_sigs_a = vec![
+            (Amount::from_sat(20), vec![
+                dummy_sig!(secp256k1::Signature::from_str("304502210089a1b4a09cafb8f26d6355c5ad51c686d8796d3a833945de35687085b1cd048e022068f6ac3fd4d3909f5d3cf93b0cf6538edfbafdd0b36d858c073e4b9b4137a027").unwrap()),
+                dummy_sig!(secp256k1::Signature::from_str("3044022009334cec178a66aef6a473fc9d7608cc2b53495d433920262ba50e8a2947bba202207a0eb002ebe2fc0774adbe9b28885d00758d3043497aae414884bbc8cf7c84dc").unwrap()),
+            ]),
+            (Amount::from_sat(100), vec![
+                dummy_sig!(secp256k1::Signature::from_str("304402203febe46a50657fa2ce6c779d133bfaea3642ebe50bf86890277280db2874b918022033cac5f7056857ce31b28d6291973d850c16c6d7b96857da4904a893073c31c8").unwrap()),
+                dummy_sig!(secp256k1::Signature::from_str("3044022062f0be249de61d92b05daec0639e4457cb8190e04b4cd573952ea3cc37c347e90220498c9c38f3c13c6303468ef66ade54bde064b1e04e8207c68c428f27fed53b01").unwrap()),
+            ]),
+            (Amount::from_sat(200), vec![
+                dummy_sig!(secp256k1::Signature::from_str("304402201f72b96bb25e9dc317fe42f0f7ee1b0ba2e2cd9318182f00fd7853bf602245c102205fd09c6dfefa21702ce453a7f948ade2f07f55ed30bc511cb7144ba23c281d47").unwrap()),
+                dummy_sig!(secp256k1::Signature::from_str("304402205f49f96c071826efa047dd78b148bd6be41b8777e9c9d3e63be7d9d52eb1a02d022024da8260ad9d6607885f190545e8b15069a1f55345aa267e58c3dd9cdfb0896e").unwrap()),
+            ]),
+            (Amount::from_sat(500), vec![
+                dummy_sig!(secp256k1::Signature::from_str("3044022054b12291804a1a77032306cd16f21b6c83dd1db9e1d131cf9bf61633dbfd561d02207ed8c7164c7eb85342b565b88ef267d4ccc365f19dbcb6ec86a8f34946595ee9").unwrap()),
+                dummy_sig!(secp256k1::Signature::from_str("30440220568f727bbedd775d2575b09c4c498414670d484bc4e56f22205d62ca8344b1e80220421b1e620428d7fe622b782dee037c0845949ad6c7b0954e9c50231823011f3a").unwrap()),
+            ]),
+            (Amount::from_sat(1_000), vec![
+                dummy_sig!(secp256k1::Signature::from_str("304402202dbabc45cf02ba224feaa8a71389d256535257d4a9223b15062a43b3eada55cc0220468216683b9ceab08a03a50d15cbd469d41aaa14566f615465f1fc14015cbedc").unwrap()),
+                dummy_sig!(secp256k1::Signature::from_str("304402205fb5a8feb01529c0cb34607632f3d18de26eca0d71589f0be5631fa9029bd1dd022016f995a10be06986bbf8dfee0477142ea8024d4fa651b48990de817765f81ca0").unwrap()),
+            ]),
+        ];
         let outpoint_b = OutPoint::from_str(
             "69a747cd1ea7ce4904e6173b06a4a83e0df173661046e70f5128b3c9bef8241d:18",
         )
         .unwrap();
         let deriv_b = bip32::ChildNumber::from((1 << 31) - 1);
         let amount_b = Amount::from_sat(1298766);
-        let emer_sigs_b: collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = [
+        let emer_sigs_b = vec![
             dummy_sig!(secp256k1::Signature::from_str("304402207d1d99b6164597cee75baa0de60d4988f298fbc1857ca67102996287d8ccc76402207d9a2997a79c895d34d9bc450219b988d40cc2054f25a9a4e582666b96dc2444").unwrap()),
             dummy_sig!(secp256k1::Signature::from_str("3044022031c4547c4f3688b02ff749c6830579318d4ba24bb832dffff5156b2bb751480c022060f6745664612b70e8acb3db3e00af60952bda853891edc6d98a83825e92aeb6").unwrap())
-        ].iter().copied().collect();
-        let unemer_sigs_b: collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = [
+        ];
+        let unemer_sigs_b = vec![
             dummy_sig!(secp256k1::Signature::from_str("30450221009c93c095d2d8cb7f7918bc6b43de451f146eec07d8569a77eed2d14d25fafee50220656328e7e74953c82c4af62fd809bea903de1d9b92de8f4d02450f5d9a2d02ab").unwrap()),
             dummy_sig!(secp256k1::Signature::from_str("3045022100ca96469270b45e4be24c70115de4545b975c27b60c007b4668cc6edb97944ee302203a078a1cd7d36c6293635dc9604bb7ced31d5a98c8a01a2f7fb2da533245d074").unwrap())
-        ].iter().copied().collect();
-        let cancel_sigs_b: collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = [
-            dummy_sig!(secp256k1::Signature::from_str("304402207e17f075edacc44be94263caa38e0b94dcffd65f2e76159def578d61dd82cbbe02202f300241721dfa8334cc8835d422e8928a7a87301be094e8c296ecdf945c9d71").unwrap()),
-            dummy_sig!(secp256k1::Signature::from_str("30440220398b5d0a75911f69c37c71e929727d16bf48a6b6cc46b1db0d6097f91eb7ecfa0220379c43fc3db9b70b2d3d5d945f8d51ae2660bdedd94b8468abb92c7f2c1989a8").unwrap()),
-        ].iter().copied().collect();
+        ];
+        let cancel_sigs_b = vec![
+            (Amount::from_sat(20), vec![
+                dummy_sig!(secp256k1::Signature::from_str("304402207e17f075edacc44be94263caa38e0b94dcffd65f2e76159def578d61dd82cbbe02202f300241721dfa8334cc8835d422e8928a7a87301be094e8c296ecdf945c9d71").unwrap()),
+                dummy_sig!(secp256k1::Signature::from_str("30440220398b5d0a75911f69c37c71e929727d16bf48a6b6cc46b1db0d6097f91eb7ecfa0220379c43fc3db9b70b2d3d5d945f8d51ae2660bdedd94b8468abb92c7f2c1989a8").unwrap()),
+            ]),
+            (Amount::from_sat(100), vec![
+                dummy_sig!(secp256k1::Signature::from_str("304402200c6101856c1d55dd778a0e4284017fa82d22463690f0f97085d806d31bbfcd8d0220711fb191b845c585c2512193a98de1a9c419076966ada67402441c842925ec29").unwrap()),
+                dummy_sig!(secp256k1::Signature::from_str("304402202302f07b80b0556dc7523cd25379fad803b5c9d5601d9a1fe5d7c855623a77b402207d2a8d1739a3805913b43b59d04021552ee45a8b41ee838c9bc3aa9a27077b2e").unwrap()),
+            ]),
+            (Amount::from_sat(200), vec![
+                dummy_sig!(secp256k1::Signature::from_str("3045022100ba92de0e58ad549032d3c05a21e1ed398694134cce6966bc6b83a7b23772fef402206d8eea7be2c46ba4e7dd1d311daac3160bd2bfd27563cddce6d71a38e97cf906").unwrap()),
+                dummy_sig!(secp256k1::Signature::from_str("304502210096343b652a254266c4b743a9fce5746a1cab080ab14561f470ced63920a6e91a022022b96d0e29abcf4a206195972dc7f881e9cd1513f7420c05c0c316546e138381").unwrap()),
+            ]),
+            (Amount::from_sat(500), vec![
+                dummy_sig!(secp256k1::Signature::from_str("304402203fdd610ccb70754bdca30a9d377c630644b49b586a48deacc635a55190a0fd2e022001c89528605fe44a0300bed3872389d88936a1a2b5aff4728eb903d17f895793").unwrap()),
+                dummy_sig!(secp256k1::Signature::from_str("3044022006bfb52148b8b49edca1a714c4002839e375baeebdb3cbaf806129ecc257425702205246e46308eba2a177defd5bbee4c86831e755b97538f453d7b42985f5a8eabc").unwrap()),
+            ]),
+            (Amount::from_sat(1_000), vec![
+                dummy_sig!(secp256k1::Signature::from_str("3044022048ea138e79ad3e75c55174a67dc9616f113018660ec8934c847b209504c93c9f02207c37d945b1810773d85a9a169fd3343877c856a9309434c10fd35e660324cd2e").unwrap()),
+                dummy_sig!(secp256k1::Signature::from_str("30450221009423e44dfc37556f9a544c61e7551806b591c1a0d3040d4d8b5c273a1897c0a6022028ec2788b569bca9d3b90cda82a20611b0bcfc9443df72fdfca2fb7c44c5b1a3").unwrap()),
+            ]),
+
+        ];
 
         // We can insert and query no-yet-unvaulted vaults
         db_new_vault(
@@ -677,9 +761,9 @@ mod tests {
             &outpoint_a,
             deriv_a,
             amount_a,
-            &emer_sigs_a,
-            &cancel_sigs_a,
-            &unemer_sigs_a,
+            emer_sigs_a.clone(),
+            cancel_sigs_a.clone(),
+            unemer_sigs_a.clone(),
         )
         .unwrap();
         assert_eq!(
@@ -704,9 +788,9 @@ mod tests {
             &outpoint_b,
             deriv_b,
             amount_b,
-            &emer_sigs_b,
-            &cancel_sigs_b,
-            &unemer_sigs_b,
+            emer_sigs_b.clone(),
+            cancel_sigs_b.clone(),
+            unemer_sigs_b.clone(),
         )
         .unwrap();
         assert_eq!(
@@ -731,55 +815,120 @@ mod tests {
         );
         assert_eq!(db_blank_vaults(&db_path).unwrap().len(), 2);
 
-        // We can get the revocation signatures for these vaults now
+        // We can get the revocation signatures for these vaults now. For the Cancel we can also
+        // get it by feerate. For the others, the feerate must be NULL.
         assert_eq!(
             db_emergency_signatures(&db_path, 1)
                 .unwrap()
                 .into_iter()
                 .map(|db_sig| (db_sig.pubkey, db_sig.signature))
-                .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
+                .collect::<Vec<(secp256k1::PublicKey, secp256k1::Signature)>>(),
             emer_sigs_a
+        );
+        assert!(
+            db_emergency_signatures(&db_path, 1)
+                .unwrap()
+                .iter()
+                .all(|db_sig| db_sig.feerate.is_none()),
+            "Not a Cancel"
         );
         assert_eq!(
             db_unvault_emergency_signatures(&db_path, 1)
                 .unwrap()
                 .into_iter()
                 .map(|db_sig| (db_sig.pubkey, db_sig.signature))
-                .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
+                .collect::<Vec<(secp256k1::PublicKey, secp256k1::Signature)>>(),
             unemer_sigs_a
         );
+        assert!(
+            db_unvault_emergency_signatures(&db_path, 1)
+                .unwrap()
+                .iter()
+                .all(|db_sig| db_sig.feerate.is_none()),
+            "Not a Cancel"
+        );
+        let all_cancel_sigs_a = cancel_sigs_a.iter().fold(vec![], |mut acc, (_, sigs)| {
+            acc.extend_from_slice(sigs);
+            acc
+        });
         assert_eq!(
-            db_cancel_signatures(&db_path, 1)
+            db_cancel_signatures(&db_path, 1, None)
                 .unwrap()
                 .into_iter()
                 .map(|db_sig| (db_sig.pubkey, db_sig.signature))
-                .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
-            cancel_sigs_a
+                .collect::<Vec<(secp256k1::PublicKey, secp256k1::Signature)>>(),
+            all_cancel_sigs_a
+        );
+        for (feerate, sigs) in cancel_sigs_a.clone() {
+            assert_eq!(
+                db_cancel_signatures(&db_path, 1, Some(feerate))
+                    .unwrap()
+                    .into_iter()
+                    .map(|db_sig| (db_sig.pubkey, db_sig.signature))
+                    .collect::<Vec<(secp256k1::PublicKey, secp256k1::Signature)>>(),
+                sigs
+            );
+        }
+        assert!(
+            db_cancel_signatures(&db_path, 1, None)
+                .unwrap()
+                .iter()
+                .all(|db_sig| db_sig.feerate.is_some()),
+            "Always set for a Cancel"
         );
         assert_eq!(
             db_emergency_signatures(&db_path, 2)
                 .unwrap()
                 .into_iter()
                 .map(|db_sig| (db_sig.pubkey, db_sig.signature))
-                .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
+                .collect::<Vec<(secp256k1::PublicKey, secp256k1::Signature)>>(),
             emer_sigs_b
+        );
+        assert!(
+            db_emergency_signatures(&db_path, 2)
+                .unwrap()
+                .iter()
+                .all(|db_sig| db_sig.feerate.is_none()),
+            "Not a Cancel"
         );
         assert_eq!(
             db_unvault_emergency_signatures(&db_path, 2)
                 .unwrap()
                 .into_iter()
                 .map(|db_sig| (db_sig.pubkey, db_sig.signature))
-                .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
+                .collect::<Vec<(secp256k1::PublicKey, secp256k1::Signature)>>(),
             unemer_sigs_b
         );
+        assert!(
+            db_unvault_emergency_signatures(&db_path, 2)
+                .unwrap()
+                .iter()
+                .all(|db_sig| db_sig.feerate.is_none()),
+            "Not a Cancel"
+        );
+
+        let all_cancel_sigs_b = cancel_sigs_b.iter().fold(vec![], |mut acc, (_, sigs)| {
+            acc.extend_from_slice(sigs);
+            acc
+        });
         assert_eq!(
-            db_cancel_signatures(&db_path, 2)
+            db_cancel_signatures(&db_path, 2, None)
                 .unwrap()
                 .into_iter()
                 .map(|db_sig| (db_sig.pubkey, db_sig.signature))
-                .collect::<collections::BTreeMap<secp256k1::PublicKey, secp256k1::Signature>>(),
-            cancel_sigs_b
+                .collect::<Vec<(secp256k1::PublicKey, secp256k1::Signature)>>(),
+            all_cancel_sigs_b
         );
+        for (feerate, sigs) in cancel_sigs_b.clone() {
+            assert_eq!(
+                db_cancel_signatures(&db_path, 2, Some(feerate))
+                    .unwrap()
+                    .into_iter()
+                    .map(|db_sig| (db_sig.pubkey, db_sig.signature))
+                    .collect::<Vec<(secp256k1::PublicKey, secp256k1::Signature)>>(),
+                sigs
+            );
+        }
 
         // We can't insert a vault twice
         db_new_vault(
@@ -787,9 +936,9 @@ mod tests {
             &outpoint_a,
             deriv_a,
             amount_a,
-            &emer_sigs_a,
-            &cancel_sigs_a,
-            &unemer_sigs_b,
+            emer_sigs_a,
+            cancel_sigs_a,
+            unemer_sigs_b,
         )
         .unwrap_err();
 
@@ -874,13 +1023,13 @@ mod tests {
         assert!(db_unvault_emergency_signatures(&db_path, 1)
             .unwrap()
             .is_empty());
-        assert!(db_cancel_signatures(&db_path, 1).unwrap().is_empty());
+        assert!(db_cancel_signatures(&db_path, 1, None).unwrap().is_empty());
 
         assert!(db_emergency_signatures(&db_path, 2).unwrap().is_empty());
         assert!(db_unvault_emergency_signatures(&db_path, 2)
             .unwrap()
             .is_empty());
-        assert!(db_cancel_signatures(&db_path, 2).unwrap().is_empty());
+        assert!(db_cancel_signatures(&db_path, 2, None).unwrap().is_empty());
 
         // Cleanup
         fs::remove_file(&db_path).unwrap();
