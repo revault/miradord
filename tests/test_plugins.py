@@ -64,11 +64,11 @@ def test_max_value_in_flight(miradord, bitcoind):
     unvault_txid = bitcoind.rpc.decoderawtransaction(txs["unvault"]["tx"])["txid"]
     bitcoind.rpc.sendrawtransaction(txs["unvault"]["tx"])
     bitcoind.generate_block(1, unvault_txid)
-    cancel_txid = bitcoind.rpc.decoderawtransaction(txs["cancel"]["tx"])["txid"]
+    cancel_txid = bitcoind.rpc.decoderawtransaction(txs["cancel"]["tx"]["20"])["txid"]
     miradord.wait_for_logs(
         [
             f"Got a confirmed Unvault UTXO for vault at '{deposit_outpoint}'",
-            f"Broadcasted Cancel transaction '{txs['cancel']['tx']}'",
+            f"Broadcasted Cancel transaction '{txs['cancel']['tx']['20']}'",
             f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is still unspent",
         ]
     )
@@ -163,11 +163,11 @@ def test_multiple_plugins(miradord, bitcoind):
     unvault_txid = bitcoind.rpc.decoderawtransaction(txs["unvault"]["tx"])["txid"]
     bitcoind.rpc.sendrawtransaction(txs["unvault"]["tx"])
     bitcoind.generate_block(1, unvault_txid)
-    cancel_txid = bitcoind.rpc.decoderawtransaction(txs["cancel"]["tx"])["txid"]
+    cancel_txid = bitcoind.rpc.decoderawtransaction(txs["cancel"]["tx"]["20"])["txid"]
     miradord.wait_for_logs(
         [
             f"Got a confirmed Unvault UTXO for vault at '{deposit_outpoint}'",
-            f"Broadcasted Cancel transaction '{txs['cancel']['tx']}'",
+            f"Broadcasted Cancel transaction '{txs['cancel']['tx']['20']}'",
             f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is still unspent",
         ]
     )

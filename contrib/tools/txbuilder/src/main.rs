@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, env, process, str::FromStr};
 
+use revault_net::message::watchtower::CancelFeerate;
 use revault_tx::{
     bitcoin::{
         consensus::encode::serialize_hex, secp256k1, util::bip32, Address, Amount, OutPoint,
@@ -190,7 +191,6 @@ fn main() {
             eprintln!("Failed to derive transaction chain: '{}'", e);
             process::exit(1);
         });
-    let mut cancel_tx = cancel_batch.into_feerate_20();
     let der_unvault_desc = unvault_desc.derive(derivation_index.into(), &secp);
     let unvault_txin = unvault_tx.spend_unvault_txin(&der_unvault_desc);
     let spend_txo = revault_tx::txouts::SpendTxOut::new(TxOut {
@@ -222,7 +222,15 @@ fn main() {
         })
         .collect();
     let unvault_sigs = sign(&mut unvault_tx, &stk_privkeys, &secp);
-    let cancel_sigs = sign(&mut cancel_tx, &stk_privkeys, &secp);
+    let mut cancel_sigs = BTreeMap::new();
+    let mut cancel_txs = BTreeMap::new();
+    for (feerate, mut cancel_tx) in cancel_batch.feerates_map() {
+        cancel_sigs.insert(
+            CancelFeerate(feerate),
+            sign(&mut cancel_tx, &stk_privkeys, &secp),
+        );
+        cancel_txs.insert(CancelFeerate(feerate), serialize_hex(&cancel_tx.into_tx()));
+    }
     let emer_sigs = sign(&mut emer_tx, &stk_privkeys, &secp);
     let unemer_sigs = sign(&mut unemer_tx, &stk_privkeys, &secp);
     let spend_privkeys: Vec<secp256k1::SecretKey> = man_xprivs
@@ -246,7 +254,7 @@ fn main() {
                 "sigs": unvault_sigs,
             }),
             "cancel": serde_json::json!({
-                "tx": serialize_hex(&cancel_tx.into_tx()),
+                "tx": cancel_txs,
                 "sigs": cancel_sigs,
             }),
             "emer": serde_json::json!({
