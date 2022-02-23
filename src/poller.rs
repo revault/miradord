@@ -125,16 +125,12 @@ fn manage_unvaulted_vaults(
     current_tip: &ChainTip,
     db_updates: &mut DbUpdates,
 ) -> Result<UpdatedVaults, PollerError> {
-    let mut unvaulted_vaults = db_unvaulted_vaults(db_path)?;
     // We don't have all the unvaulted_vaults in db, some of them are
     // in our db_updates
-    let mut new_unvaulted_vaults = db_updates
-        .new_unvaulted
-        .clone()
-        .values()
-        .map(|v| v.clone())
-        .collect::<Vec<_>>();
-    unvaulted_vaults.append(&mut new_unvaulted_vaults);
+    let unvaulted_vaults = db_unvaulted_vaults(db_path)?;
+    let unvaulted_vaults = unvaulted_vaults
+        .iter()
+        .chain(db_updates.new_unvaulted.values());
     let mut updated_vaults = UpdatedVaults {
         successful_attempts: vec![],
         revaulted_attempts: vec![],
