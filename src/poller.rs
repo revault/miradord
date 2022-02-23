@@ -100,6 +100,7 @@ fn unvault_tx(
     )
 }
 
+// The database updates we cache to avoid partial write in case the chain tip moved
 #[derive(Default, Debug)]
 struct DbUpdates {
     // vault_id, unvault_height
@@ -110,6 +111,33 @@ struct DbUpdates {
     pub to_be_deleted: Vec<i64>,
     // vault_id, confirmed height
     pub spender_confirmed: Vec<(i64, i32)>,
+}
+
+impl DbUpdates {
+    // Write the cached DB updates to the specified database. Move out so we never write twice.
+    pub fn write(self, db_path: &path::Path) -> Result<(), DatabaseError> {
+        for (_, vault) in self.new_unvaulted {
+            db_should_not_cancel_vault(
+                db_path,
+                vault.id,
+                vault.unvault_height.expect("We always set it"),
+            )?;
+        }
+
+        for (vault_id, unvault_height) in self.should_cancel {
+            db_should_cancel_vault(db_path, vault_id, unvault_height)?;
+        }
+
+        for vault_id in self.to_be_deleted {
+            db_del_vault(db_path, vault_id)?;
+        }
+
+        for (vault_id, height) in self.spender_confirmed {
+            db_unvault_spender_confirmed(db_path, vault_id, height)?;
+        }
+
+        Ok(())
+    }
 }
 
 struct UpdatedVaults {
@@ -411,30 +439,6 @@ fn get_vaults_to_revault(
     Ok(outpoints_to_revault)
 }
 
-fn update_db(db_path: &path::Path, db_updates: DbUpdates) -> Result<(), PollerError> {
-    for (_, vault) in db_updates.new_unvaulted {
-        db_should_not_cancel_vault(
-            db_path,
-            vault.id,
-            vault.unvault_height.expect("We always set it"),
-        )?;
-    }
-
-    for (vault_id, unvault_height) in db_updates.should_cancel {
-        db_should_cancel_vault(db_path, vault_id, unvault_height)?;
-    }
-
-    for vault_id in db_updates.to_be_deleted {
-        db_del_vault(db_path, vault_id)?;
-    }
-
-    for (vault_id, height) in db_updates.spender_confirmed {
-        db_unvault_spender_confirmed(db_path, vault_id, height)?;
-    }
-
-    Ok(())
-}
-
 // We only do actual processing on new blocks. This puts a natural limit on the amount of work
 // we are doing, reduces the number of edge cases we need to handle, and there is no benefit to try
 // to cancel Unvaults right after their broadcast.
@@ -495,6 +499,8 @@ fn new_block(
     // Any consolidation to be processed given the current fee market?
     // TODO
 
+    // Should the tip have moved under our feet while we cached the updates, we'd have errored by
+    // now. So now it's safe to poll the plugins and update the DB.
     let outpoints_to_revault = get_vaults_to_revault(
         db_path,
         secp,
@@ -503,7 +509,6 @@ fn new_block(
         &new_blk_info,
         &mut db_updates,
     )?;
-
     for (db_vault, unvault_txin, deposit_desc) in outpoints_to_revault {
         revault(
             db_path,
@@ -514,8 +519,7 @@ fn new_block(
             &deposit_desc,
         )?;
     }
-
-    update_db(&db_path, db_updates)?;
+    db_updates.write(db_path)?;
     db_update_tip(db_path, current_tip.height, current_tip.hash)?;
 
     log::debug!(
