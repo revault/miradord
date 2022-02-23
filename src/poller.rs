@@ -450,8 +450,13 @@ fn new_block(
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
 ) -> Result<(), PollerError> {
-    // Storing everything we need to udpate in the db, so we can update it
-    // all in one batch at the end
+    // We want to update our state for a given height, therefore we need to stop the updating
+    // process if we notice that the chain moved forward under us (or we could end up assuming
+    // events that happened in the new block had already occured at the initial height). In order
+    // to avoid partial writes to the DB we cache the state updates to only apply them once we've
+    // made sure the chain didn't move in-between the beginning and the end of the updating
+    // process.
+    // The same goes for polling the plugins as for updating the DB.
     let mut db_updates = DbUpdates::default();
 
     // Update the fee-bumping reserves estimates
