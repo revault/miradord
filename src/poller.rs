@@ -553,7 +553,9 @@ pub fn main_loop(
             }
 
             match new_block(db_path, secp, config, bitcoind, &bitcoind_tip) {
-                Ok(()) | Err(PollerError::TipChanged) => {}
+                Ok(()) => {}
+                // Retry immediately if the tip changed while we were updating ourselves
+                Err(PollerError::TipChanged) => continue,
                 Err(e) => return Err(e),
             }
         } else if bitcoind_tip.hash != db_instance.tip_blockhash {
