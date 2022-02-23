@@ -496,7 +496,7 @@ fn new_block(
     // Update the fee-bumping reserves estimates
     // TODO
 
-    // Any vault to forget and feebump coins to unregister?
+    // Any vault to forget about?
     // TODO
 
     // Any Unvault txo confirmed?
@@ -529,17 +529,6 @@ fn new_block(
         revaulted_attempts,
     };
 
-    // Any coin received on the FB wallet?
-    // TODO
-
-    // Any FB coin to be registered for consolidation?
-    // TODO
-
-    // Any consolidation to be processed given the current fee market?
-    // TODO
-
-    // Should the tip have moved under our feet while we cached the updates, we'd have errored by
-    // now. So now it's safe to poll the plugins and update the DB.
     let outpoints_to_revault = get_vaults_to_revault(
         db_path,
         secp,
