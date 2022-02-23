@@ -1,6 +1,6 @@
 from concurrent import futures
 from ephemeral_port_reserve import reserve
-from test_framework.bitcoind import Bitcoind
+from test_framework.bitcoind import Bitcoind, BitcoindRpcProxy
 from test_framework.miradord import Miradord
 from test_framework.utils import (
     get_descriptors,
@@ -114,7 +114,11 @@ def bitcoind(directory):
 
 
 @pytest.fixture
-def miradord(bitcoind, directory):
+def miradord(request, bitcoind, directory):
+    """If a 'mock_bitcoind' pytest marker is set, it will create a proxy for the communication
+    from the miradord process to the bitcoind process. An optional 'mocks' parameter can be set
+    for this marker in order to specify some pre-registered mock of RPC commands.
+    """
     datadir = os.path.join(directory, "miradord")
     os.makedirs(datadir, exist_ok=True)
 
@@ -129,6 +133,17 @@ def miradord(bitcoind, directory):
     coordinator_noise_key = (
         "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
     )
+
+    bitcoind_cookie = os.path.join(bitcoind.bitcoin_dir, "regtest", ".cookie")
+    bitcoind_rpcport = bitcoind.rpcport
+
+    # Check if we should mock bitcoind
+    for m in request.node.iter_markers():
+        if m.name == "mock_bitcoind":
+            mocks = m.kwargs.get("mocks", {})
+            bitcoind.proxy = BitcoindRpcProxy(bitcoind_rpcport, bitcoind_cookie, mocks)
+            bitcoind_rpcport = bitcoind.proxy.rpcport
+
     miradord = Miradord(
         datadir,
         dep_desc,
@@ -140,10 +155,13 @@ def miradord(bitcoind, directory):
         os.urandom(32),
         coordinator_noise_key,  # Unused yet
         reserve(),  # Unused yet
-        bitcoind,
+        bitcoind_rpcport,
+        bitcoind_cookie,
     )
-    miradord.start()
 
-    yield miradord
-
-    miradord.cleanup()
+    try:
+        miradord.start()
+        yield miradord
+    except Exception:
+        miradord.cleanup()
+        raise
