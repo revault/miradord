@@ -1,4 +1,5 @@
 import os
+import pytest
 
 from fixtures import *
 from test_framework.utils import COIN, DEPOSIT_ADDRESS, DERIV_INDEX, CSV
@@ -125,3 +126,101 @@ def test_simple_spend_detection(miradord, bitcoind):
     # Generate two days worth of blocks, the WT should forget about this vault
     bitcoind.generate_block(288)
     miradord.wait_for_log(f"Forgetting about consumed vault at '{deposit_outpoint}'")
+
+
+def assert_cancel_broadcast(
+    miradord, bitcoind, deposit_outpoint, deposit_value, feerate
+):
+    """Register a vault to be watched by the WT, Unvault it, and assert the Cancel transaction
+    at the given feerate is broadcasted in response.
+    """
+    txs = miradord.watch_vault(deposit_outpoint, deposit_value * COIN, DERIV_INDEX)
+    unvault_txid = bitcoind.rpc.decoderawtransaction(txs["unvault"]["tx"])["txid"]
+    bitcoind.rpc.sendrawtransaction(txs["unvault"]["tx"])
+    bitcoind.generate_block(1, unvault_txid)
+
+    cancel_tx = txs["cancel"]["tx"][f"{feerate}"]
+    cancel_txid = bitcoind.rpc.decoderawtransaction(cancel_tx)["txid"]
+    miradord.wait_for_logs(
+        [
+            f"Got a confirmed Unvault UTXO for vault at '{deposit_outpoint}'",
+            f"Broadcasted Cancel transaction '{cancel_tx}'",
+            f"Unvault transaction '{unvault_txid}' for vault at '{deposit_outpoint}' is still unspent",
+        ]
+    )
+    bitcoind.generate_block(1, wait_for_mempool=cancel_txid)
+    miradord.wait_for_log(
+        f"Cancel transaction was confirmed for vault at '{deposit_outpoint}'"
+    )
+
+
+@pytest.mark.mock_bitcoind
+def test_cancel_feerate_adaptation(miradord, bitcoind):
+    """
+    Sanity check the poller will chose the Cancel tx presigned with the feerate adapted
+    to the next block feerate estimate it got from bitcoind.
+    """
+    # Make the watchtower revault everything
+    plugin_path = os.path.join(os.path.dirname(__file__), "plugins", "revault_all.py")
+    miradord.add_plugins([{"path": plugin_path}])
+
+    # Create a new deposit and Mock the estimate to return 10sat/vb. It should make the poller
+    # broadcast the 20sat/vb Cancel.
+    deposit_value = 0.5
+    deposit_txid, deposit_outpoint = bitcoind.create_utxo(
+        DEPOSIT_ADDRESS, deposit_value
+    )
+    bitcoind.generate_block(1, deposit_txid)
+    bitcoind.proxy.mocks["estimatesmartfee"] = {"feerate": 10 * 10 ** 3 / COIN}
+    assert_cancel_broadcast(miradord, bitcoind, deposit_outpoint, deposit_value, 20)
+
+    # Create a new deposit and Mock the estimate to return 28sat/vb. It should make the poller
+    # broadcast the 100sat/vb Cancel.
+    deposit_value = 0.5
+    deposit_txid, deposit_outpoint = bitcoind.create_utxo(
+        DEPOSIT_ADDRESS, deposit_value
+    )
+    bitcoind.generate_block(1, deposit_txid)
+    bitcoind.proxy.mocks["estimatesmartfee"] = {"feerate": 28 * 10 ** 3 / COIN}
+    assert_cancel_broadcast(miradord, bitcoind, deposit_outpoint, deposit_value, 100)
+
+    # Create a new deposit and Mock the estimate to return 180sat/vb. It should make the poller
+    # broadcast the 200sat/vb Cancel.
+    deposit_value = 0.5
+    deposit_txid, deposit_outpoint = bitcoind.create_utxo(
+        DEPOSIT_ADDRESS, deposit_value
+    )
+    bitcoind.generate_block(1, deposit_txid)
+    bitcoind.proxy.mocks["estimatesmartfee"] = {"feerate": 180 * 10 ** 3 / COIN}
+    assert_cancel_broadcast(miradord, bitcoind, deposit_outpoint, deposit_value, 200)
+
+    # Create a new deposit and Mock the estimate to return 350sat/vb. It should make the poller
+    # broadcast the 500sat/vb Cancel.
+    deposit_value = 0.5
+    deposit_txid, deposit_outpoint = bitcoind.create_utxo(
+        DEPOSIT_ADDRESS, deposit_value
+    )
+    bitcoind.generate_block(1, deposit_txid)
+    bitcoind.proxy.mocks["estimatesmartfee"] = {"feerate": 350 * 10 ** 3 / COIN}
+    assert_cancel_broadcast(miradord, bitcoind, deposit_outpoint, deposit_value, 500)
+
+    # Create a new deposit and Mock the estimate to return 700sat/vb. It should make the poller
+    # broadcast the 1000sat/vb Cancel.
+    deposit_value = 0.5
+    deposit_txid, deposit_outpoint = bitcoind.create_utxo(
+        DEPOSIT_ADDRESS, deposit_value
+    )
+    bitcoind.generate_block(1, deposit_txid)
+    bitcoind.proxy.mocks["estimatesmartfee"] = {"feerate": 700 * 10 ** 3 / COIN}
+    assert_cancel_broadcast(miradord, bitcoind, deposit_outpoint, deposit_value, 1_000)
+
+    # Create a new deposit and Mock the estimate to return 1700sat/vb. It should make the poller
+    # still broadcast the 1000sat/vb Cancel, as we make the (security) assumption the feerate
+    # won't go above 1_000 sat/vb for the entire duration of the timelock.
+    deposit_value = 0.5
+    deposit_txid, deposit_outpoint = bitcoind.create_utxo(
+        DEPOSIT_ADDRESS, deposit_value
+    )
+    bitcoind.generate_block(1, deposit_txid)
+    bitcoind.proxy.mocks["estimatesmartfee"] = {"feerate": 1_700 * 10 ** 3 / COIN}
+    assert_cancel_broadcast(miradord, bitcoind, deposit_outpoint, deposit_value, 1_000)

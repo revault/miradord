@@ -251,21 +251,38 @@ fn manage_unvaulted_vaults(
     Ok(updated_vaults)
 }
 
-// TODO: actual feebump computation, register attempt in db, ..
-fn revault(
+// Translate an estimate into the feerate threshold to use.
+fn cancel_feerate_from_estimate(estimate: Amount) -> Amount {
+    // NOTE: Because of the MSRV, we can't iterate by value on the array.
+    // TODO: a constant in revault_tx instead of these? (need to move from WU to vb first)
+    for threshold in &[20, 100, 200, 500] {
+        if estimate.as_sat() <= *threshold {
+            return Amount::from_sat(*threshold);
+        }
+    }
+
+    Amount::from_sat(1_000)
+}
+
+// Get a finalized Cancel transaction from the estimated feerate to get included in the next
+// block(s).
+fn cancel_tx_from_estimate(
     db_path: &path::Path,
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
-    bitcoind: &BitcoinD,
     db_vault: &DbVault,
     unvault_txin: UnvaultTxIn,
     deposit_desc: &DerivedDepositDescriptor,
-) -> Result<(), PollerError> {
-    // TODO: choose the appropriate one based on feerate
-    let feerate_vb = Amount::from_sat(20);
-    let mut cancel_tx = CancelTransaction::new(unvault_txin, &deposit_desc, feerate_vb / 4)
-        .expect("Can only fail if we have an insane feebumping input");
+    estimate: Amount,
+) -> CancelTransaction {
+    let cancel_feerate = cancel_feerate_from_estimate(estimate);
 
-    for db_sig in db_cancel_signatures(db_path, db_vault.id, Some(feerate_vb))? {
+    // FIXME: WU and vbytes in revault_tx..
+    let mut cancel_tx = CancelTransaction::new(unvault_txin, deposit_desc, cancel_feerate / 4)
+        .expect("Checked before registering the vault in DB");
+
+    for db_sig in db_cancel_signatures(db_path, db_vault.id, Some(cancel_feerate))
+        .expect("Database must be available")
+    {
         cancel_tx
             .add_sig(db_sig.pubkey, db_sig.signature, secp)
             .unwrap_or_else(|e| {
@@ -289,6 +306,29 @@ fn revault(
             cancel_tx,
             e
         ));
+
+    cancel_tx
+}
+
+// TODO: register attempt in db and re-bump if necessary
+fn revault(
+    db_path: &path::Path,
+    secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
+    bitcoind: &BitcoinD,
+    db_vault: &DbVault,
+    unvault_txin: UnvaultTxIn,
+    deposit_desc: &DerivedDepositDescriptor,
+) -> Result<(), PollerError> {
+    let estimate = bitcoind.estimatefee_next_block();
+    let cancel_tx = cancel_tx_from_estimate(
+        db_path,
+        secp,
+        db_vault,
+        unvault_txin,
+        deposit_desc,
+        // TODO: fallback for estimation failure.
+        estimate.unwrap_or_else(|| Amount::from_sat(1)),
+    );
     log::trace!("Finalized Cancel transaction '{}'", cancel_tx);
 
     let cancel_tx = cancel_tx.into_tx();
@@ -557,5 +597,228 @@ pub fn main_loop(
         }
 
         thread::sleep(config.bitcoind_config.poll_interval_secs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, fs, iter::repeat_with, path, str::FromStr, thread};
+
+    use super::*;
+
+    use crate::database::{db_new_vault, setup_db};
+    use revault_tx::{
+        bitcoin::{util::bip32, Address, Amount, Network},
+        miniscript::descriptor::{DescriptorPublicKey, DescriptorXKey, Wildcard},
+        scripts::{CpfpDescriptor, DepositDescriptor, EmergencyAddress, UnvaultDescriptor},
+        transactions::{transaction_chain, RevaultPresignedTransaction},
+    };
+
+    fn get_random_privkey(rng: &mut fastrand::Rng) -> bip32::ExtendedPrivKey {
+        let rand_bytes: Vec<u8> = repeat_with(|| rng.u8(..)).take(64).collect();
+
+        bip32::ExtendedPrivKey::new_master(Network::Bitcoin, &rand_bytes)
+            .unwrap_or_else(|_| get_random_privkey(rng))
+    }
+
+    fn get_participants_sets(
+        n_stk: usize,
+        n_man: usize,
+        secp: &secp256k1::Secp256k1<secp256k1::All>,
+    ) -> (
+        (Vec<bip32::ExtendedPrivKey>, Vec<DescriptorPublicKey>),
+        (Vec<bip32::ExtendedPrivKey>, Vec<DescriptorPublicKey>),
+        (Vec<bip32::ExtendedPrivKey>, Vec<DescriptorPublicKey>),
+    ) {
+        let mut rng = fastrand::Rng::new();
+
+        let managers_priv = (0..n_man)
+            .map(|_| get_random_privkey(&mut rng))
+            .collect::<Vec<bip32::ExtendedPrivKey>>();
+        let managers = managers_priv
+            .iter()
+            .map(|xpriv| {
+                DescriptorPublicKey::XPub(DescriptorXKey {
+                    origin: None,
+                    xkey: bip32::ExtendedPubKey::from_private(&secp, &xpriv),
+                    derivation_path: bip32::DerivationPath::from(vec![]),
+                    wildcard: Wildcard::Unhardened,
+                })
+            })
+            .collect::<Vec<DescriptorPublicKey>>();
+
+        let stakeholders_priv = (0..n_stk)
+            .map(|_| get_random_privkey(&mut rng))
+            .collect::<Vec<bip32::ExtendedPrivKey>>();
+        let stakeholders = stakeholders_priv
+            .iter()
+            .map(|xpriv| {
+                DescriptorPublicKey::XPub(DescriptorXKey {
+                    origin: None,
+                    xkey: bip32::ExtendedPubKey::from_private(&secp, &xpriv),
+                    derivation_path: bip32::DerivationPath::from(vec![]),
+                    wildcard: Wildcard::Unhardened,
+                })
+            })
+            .collect::<Vec<DescriptorPublicKey>>();
+
+        let cosigners_priv = (0..n_stk)
+            .map(|_| get_random_privkey(&mut rng))
+            .collect::<Vec<bip32::ExtendedPrivKey>>();
+        let cosigners = cosigners_priv
+            .iter()
+            .map(|xpriv| {
+                DescriptorPublicKey::XPub(DescriptorXKey {
+                    origin: None,
+                    xkey: bip32::ExtendedPubKey::from_private(&secp, &xpriv),
+                    derivation_path: bip32::DerivationPath::from(vec![]),
+                    wildcard: Wildcard::Unhardened,
+                })
+            })
+            .collect::<Vec<DescriptorPublicKey>>();
+
+        (
+            (managers_priv, managers),
+            (stakeholders_priv, stakeholders),
+            (cosigners_priv, cosigners),
+        )
+    }
+
+    // Sanity check we can get the Cancel transaction and finalize it from the DB signatures
+    // at all feerate thresholds.
+    #[test]
+    fn cancel_from_feerate() {
+        // Boilerplate for the setup
+        let secp_ctx = secp256k1::Secp256k1::new();
+        let db_path: path::PathBuf =
+            format!("scratch_test_{:?}.sqlite3", thread::current().id()).into();
+
+        let ((_, managers), (stakeholders_priv, stakeholders), (_, cosigners)) =
+            get_participants_sets(3, 2, &secp_ctx);
+
+        let deposit_descriptor = DepositDescriptor::new(stakeholders.clone()).unwrap();
+        let cpfp_descriptor = CpfpDescriptor::new(managers.clone()).unwrap();
+        let unvault_descriptor =
+            UnvaultDescriptor::new(stakeholders.clone(), managers, 2, cosigners, 2021).unwrap();
+        let emergency_address = EmergencyAddress::from(
+            Address::from_str("bc1q906h8q49vu20cyffqklnzcda20k7c3m83fltey344kz3lctlx9xqhf2v56")
+                .unwrap(),
+        )
+        .unwrap();
+
+        // Remove any potential leftover from a previous crashed session and create the database
+        fs::remove_file(&db_path).unwrap_or_else(|_| ());
+        setup_db(
+            &db_path,
+            &deposit_descriptor,
+            &unvault_descriptor,
+            &cpfp_descriptor,
+            Network::Bitcoin,
+        )
+        .unwrap();
+
+        // A dummy deposit
+        let deposit_outpoint = OutPoint::from_str(
+            "cb5eb24aa77687b1e9794a826e50a35ed7378b2e5879692827de0a597446f0c8:0",
+        )
+        .unwrap();
+        let deposit_value = Amount::from_sat(98765145);
+        let derivation_index = 456789.into();
+        let (_, cancel_batch, emer_tx, unemer_tx) = transaction_chain(
+            deposit_outpoint,
+            deposit_value,
+            &deposit_descriptor,
+            &unvault_descriptor,
+            &cpfp_descriptor,
+            derivation_index,
+            emergency_address.clone(),
+            &secp_ctx,
+        )
+        .unwrap();
+
+        // Valid signatures for all transactions for this dummy deposit
+        let sighash = emer_tx.sig_hash().unwrap();
+        let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
+        let emergency_sigs: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+            stakeholders_priv
+                .iter()
+                .map(|xpriv| {
+                    let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
+                    (
+                        privkey.private_key.public_key(&secp_ctx).key,
+                        secp_ctx.sign(&sighash, &privkey.private_key.key),
+                    )
+                })
+                .collect();
+
+        let mut all_cancel_sigs = BTreeMap::new();
+        for (feerate, cancel_tx) in cancel_batch.feerates_map() {
+            let sighash = cancel_tx.sig_hash().unwrap();
+            let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
+            let cancel_sigs: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> =
+                stakeholders_priv
+                    .iter()
+                    .map(|xpriv| {
+                        let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
+                        (
+                            privkey.private_key.public_key(&secp_ctx).key,
+                            secp_ctx.sign(&sighash, &privkey.private_key.key),
+                        )
+                    })
+                    .collect();
+            all_cancel_sigs.insert(feerate, cancel_sigs);
+        }
+        let sighash = unemer_tx.sig_hash().unwrap();
+        let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
+        let unemer_sigs: BTreeMap<secp256k1::PublicKey, secp256k1::Signature> = stakeholders_priv
+            .iter()
+            .map(|xpriv| {
+                let privkey = xpriv.derive_priv(&secp_ctx, &[derivation_index]).unwrap();
+                (
+                    privkey.private_key.public_key(&secp_ctx).key,
+                    secp_ctx.sign(&sighash, &privkey.private_key.key),
+                )
+            })
+            .collect();
+
+        // Register this vault in DB, get the data needed to compute all the Cancels
+        db_new_vault(
+            &db_path,
+            &deposit_outpoint,
+            derivation_index,
+            deposit_value,
+            emergency_sigs,
+            all_cancel_sigs,
+            unemer_sigs,
+        )
+        .unwrap();
+        let db_vault = db_vault(&db_path, &deposit_outpoint).unwrap().unwrap();
+        let der_deposit_desc = deposit_descriptor.derive(derivation_index, &secp_ctx);
+        let der_unvault_desc = unvault_descriptor.derive(derivation_index, &secp_ctx);
+        let unvault_txin = unvault_tx(
+            &db_vault,
+            &der_deposit_desc,
+            &der_unvault_desc,
+            &cpfp_descriptor.derive(derivation_index, &secp_ctx),
+        )
+        .unwrap()
+        .revault_unvault_txin(&der_unvault_desc);
+
+        // It would panic on failure to satisfy the transaction. All these estimates exercise the
+        // various thresholds (20, 100, 200, 500, 1_000).
+        // NOTE: because of the MSRV, we can't iterate by value here.
+        for estimate in &[15, 57, 199, 322, 777, 1_500, 9_999_999] {
+            cancel_tx_from_estimate(
+                &db_path,
+                &secp_ctx,
+                &db_vault,
+                unvault_txin.clone(),
+                &der_deposit_desc,
+                Amount::from_sat(*estimate),
+            );
+        }
+
+        // Done: remove the db
+        fs::remove_file(&db_path).unwrap_or_else(|_| ());
     }
 }

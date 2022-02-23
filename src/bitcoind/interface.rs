@@ -1,6 +1,7 @@
 use crate::{bitcoind::BitcoindError, config::BitcoindConfig};
 use revault_tx::bitcoin::{
-    consensus::encode, Amount, BlockHash, OutPoint, Transaction as BitcoinTransaction,
+    blockdata::constants::COIN_VALUE, consensus::encode, Amount, BlockHash, OutPoint,
+    Transaction as BitcoinTransaction,
 };
 
 use std::{
@@ -412,6 +413,30 @@ impl BitcoinD {
         let tx_hex = encode::serialize_hex(tx);
         self.make_node_request_failible("sendrawtransaction", &params!(tx_hex))
             .map(|_| ())
+    }
+
+    // TODO: don't return an optional, use the last 6 block 85th percentile feerate as a fallback.
+    /// Get the feerate estimation for inclusion in the next block(s) in sat/vb.
+    pub fn estimatefee_next_block(&self) -> Option<Amount> {
+        let res = self.make_node_request("estimatesmartfee", &params!(2));
+
+        if let Some(rate_btc_kvb) = res.get("feerate").and_then(|f| f.as_f64()) {
+            let rate_sat_vb = (rate_btc_kvb * COIN_VALUE as f64 / 1_000.0) as u64;
+            if !(1..=100_000).contains(&rate_sat_vb) {
+                log::error!(
+                    "Insane value converting feerate returned by estimatesmartfee ({})",
+                    rate_btc_kvb
+                );
+                return None;
+            }
+            return Some(Amount::from_sat(rate_sat_vb));
+        }
+
+        if let Some(errors) = res.get("errors") {
+            log::error!("Error calling 'estimatesmartfee': {:?}", errors);
+        }
+
+        None
     }
 }
 
