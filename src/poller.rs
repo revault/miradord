@@ -370,45 +370,40 @@ fn get_vaults_to_revault(
         .collect::<Result<Vec<Option<DbVault>>, _>>()?
         .into_iter()
         .filter_map(|v| {
-            match v {
-                Some(v) => {
-                    // The unvault height might not be here, as we still haven't updated
-                    // the db. Look into db_updates if we have it, just in case
-                    let unvault_height = v.unvault_height.or_else(|| {
-                        db_updates
-                            .new_unvaulted
-                            .get(&v.id)
-                            .map(|v| v.unvault_height)
-                            .flatten()
-                    });
-                    if let Some(unvault_height) = unvault_height {
-                        let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &v);
-                        let unvault_tx =
-                            match unvault_tx(&v, &deposit_desc, &unvault_desc, &cpfp_desc) {
-                                Ok(tx) => tx,
-                                Err(e) => {
-                                    // TODO: handle dust better (they should never send us dust vaults though)
-                                    log::error!(
-                                        "Unexpected error deriving Unvault transaction: '{}'",
-                                        e
-                                    );
-                                    return None;
-                                }
-                            };
-                        let unvault_txin = unvault_tx.revault_unvault_txin(&unvault_desc);
-
-                        db_updates.should_cancel.push((v.id, unvault_height));
-                        Some((v, unvault_txin, deposit_desc))
-                    } else {
-                        // FIXME: should we crash? This must never happen.
-                        log::error!("One of the plugins told us to revault a non-unvaulted vault");
-                        None
-                    }
-                }
+            let v = match v {
+                Some(v) => v,
                 None => {
                     log::error!("One of the plugins returned an inexistant outpoint.");
-                    None
+                    return None;
                 }
+            };
+            // The unvault height might not be here, as we still haven't updated
+            // the db. Look into db_updates if we have it, just in case
+            let unvault_height = v.unvault_height.or_else(|| {
+                db_updates
+                    .new_unvaulted
+                    .get(&v.id)
+                    .map(|v| v.unvault_height)
+                    .flatten()
+            });
+            if let Some(unvault_height) = unvault_height {
+                let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &v);
+                let unvault_tx = match unvault_tx(&v, &deposit_desc, &unvault_desc, &cpfp_desc) {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        // TODO: handle dust better (they should never send us dust vaults though)
+                        log::error!("Unexpected error deriving Unvault transaction: '{}'", e);
+                        return None;
+                    }
+                };
+                let unvault_txin = unvault_tx.revault_unvault_txin(&unvault_desc);
+
+                db_updates.should_cancel.push((v.id, unvault_height));
+                Some((v, unvault_txin, deposit_desc))
+            } else {
+                // FIXME: should we crash? This must never happen.
+                log::error!("One of the plugins told us to revault a non-unvaulted vault");
+                None
             }
         })
         .collect();
