@@ -10,6 +10,7 @@ use std::{
     os::unix::fs::MetadataExt,
     path,
     process::{Command, Stdio},
+    collections::HashMap,
 };
 
 use serde::{Deserialize, Serialize, Serializer};
@@ -111,26 +112,14 @@ impl Plugin {
         self.path.to_string_lossy()
     }
 
-    /// Takes updates about our vaults' status and returns which should be Canceled, if any.
-    ///
-    /// This will start a plugin process and write a JSON request to its stding containing:
-    /// - the block height of the last block
-    /// - the info of vaults that were unvaulted
-    /// - the deposit outpoint of the vaults that were succesfully spent
-    /// - the deposit outpoint of the unvaulted vaults that were revaulted
-    /// It will then read a JSON response from its stdout containing a list of deposit outpoints
-    /// of vaults that should be canceled, and expect the plugin process to terminate.
-    pub fn poll(
-        &self,
-        block_height: i32,
-        block_info: &NewBlockInfo,
-    ) -> Result<Vec<OutPoint>, PluginError> {
-        let query = serde_json::json!({
-            "method": "new_block",
-            "config": self.config,
-            "block_height": block_height,
-            "block_info": block_info,
-        });
+    /// This will start a plugin process and write a JSON request to its stding containing
+    /// the query.
+    /// It will then read a JSON response from its stdout containing <T>,
+    /// and expect the plugin process to terminate.
+    fn send_message<T>(&self, query: &serde_json::Value) -> Result<T, PluginError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
         let mut query_ser =
             serde_json::to_vec(&query).expect("No string in map and Serialize won't fail");
         query_ser.push(b'\n');
@@ -171,10 +160,47 @@ impl Plugin {
             self.path.as_path(),
             String::from_utf8_lossy(&output.stdout)
         );
-        let resp: NewBlockResponse = serde_json::from_slice(&output.stdout)
+        let resp: T = serde_json::from_slice(&output.stdout)
             .map_err(|e| PluginError::Deserialization(self.path.clone(), e.to_string()))?;
 
+        Ok(resp)
+    }
+
+    /// Takes updates about our vaults' status and returns which should be Canceled, if any.
+    ///
+    /// This will send to the plugin:
+    /// - the block height of the last block
+    /// - the info of vaults that were unvaulted
+    /// - the deposit outpoint of the vaults that were succesfully spent
+    /// - the deposit outpoint of the unvaulted vaults that were revaulted
+    /// and will receive a list of deposit outpoints of vaults that should be
+    /// canceled.
+    pub fn poll(
+        &self,
+        block_height: i32,
+        block_info: &NewBlockInfo,
+    ) -> Result<Vec<OutPoint>, PluginError> {
+        let query = serde_json::json!({
+            "method": "new_block",
+            "config": self.config,
+            "block_height": block_height,
+            "block_info": block_info,
+        });
+        let resp: NewBlockResponse = self.send_message(&query)?;
+
         Ok(resp.revault)
+    }
+
+    /// Informs the plugin that it should wipe every information it has
+    /// regarding the block at height `block_height` and the following ones
+    pub fn invalidate_block(&self, block_height: i32) -> Result<HashMap<(), ()>, PluginError> {
+        let query = serde_json::json!({
+            "method": "invalidate_block",
+            "config": self.config,
+            "block_height": block_height,
+        });
+
+        self.send_message(&query)
     }
 }
 

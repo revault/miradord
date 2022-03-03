@@ -342,6 +342,25 @@ pub fn db_cancel_signatures(
     db_sigs_by_type(db_path, vault_id, SigTxType::Cancel)
 }
 
+/// Set the unvault_height and spent_height to NULL, if the unvault and spent
+/// txs weren't confirmed at the ancestor_height
+pub fn db_update_heights_after_reorg(
+    db_path: &path::Path,
+    ancestor_height: i32,
+) -> Result<(), DatabaseError> {
+    db_exec(&db_path, |db_tx| {
+        db_tx.execute(
+            "UPDATE vaults SET unvault_height = NULL WHERE unvault_height > (?1)",
+            params![ancestor_height],
+        )?;
+        db_tx.execute(
+            "UPDATE vaults SET spent_height = NULL WHERE spent_height > (?1)",
+            params![ancestor_height],
+        )?;
+        Ok(())
+    })
+}
+
 // Create the db file with RW permissions only for the user
 fn create_db_file(db_path: &path::Path) -> Result<(), DatabaseError> {
     let mut options = fs::OpenOptions::new();
