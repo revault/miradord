@@ -7,7 +7,7 @@ use crate::{
     database::{
         db_blank_vaults, db_cancel_signatures, db_del_vault, db_instance, db_should_cancel_vault,
         db_should_not_cancel_vault, db_unvault_spender_confirmed, db_unvaulted_vaults,
-        db_update_tip, db_vault, schema::DbVault, DatabaseError,
+        db_update_heights_after_reorg, db_update_tip, db_vault, schema::DbVault, DatabaseError,
     },
     plugins::{NewBlockInfo, VaultInfo},
 };
@@ -536,6 +536,48 @@ fn new_block(
     Ok(())
 }
 
+fn handle_reorg(
+    db_path: &path::Path,
+    config: &Config,
+    bitcoind: &BitcoinD,
+    old_tip: &ChainTip,
+) -> Result<(), PollerError> {
+    // Finding the common ancestor
+    let mut stats = bitcoind.get_block_stats(old_tip.hash)?;
+    let mut ancestor = ChainTip {
+        hash: old_tip.hash,
+        height: old_tip.height,
+    };
+
+    while stats.confirmations == -1 {
+        stats = bitcoind.get_block_stats(stats.previous_blockhash)?;
+        ancestor = ChainTip {
+            hash: stats.blockhash,
+            height: stats.height,
+        };
+    }
+
+    log::debug!(
+        "Unwinding the state until the common ancestor: {:?} {:?}",
+        ancestor.hash,
+        ancestor.height,
+    );
+
+    db_update_heights_after_reorg(db_path, ancestor.height)?;
+
+    for plugin in &config.plugins {
+        plugin
+            .invalidate_block(ancestor.height + 1)
+            .map(|_| ())
+            .unwrap_or_else(|e|
+                // FIXME: should we crash instead?
+                log::error!("Error when invalidating block in plugin: '{}'", e));
+    }
+    db_update_tip(db_path, ancestor.height, ancestor.hash)?;
+
+    Ok(())
+}
+
 pub fn main_loop(
     db_path: &path::Path,
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
@@ -549,7 +591,11 @@ pub fn main_loop(
         if bitcoind_tip.height > db_instance.tip_blockheight {
             let curr_tip_hash = bitcoind.block_hash(db_instance.tip_blockheight);
             if db_instance.tip_blockheight != 0 && curr_tip_hash != db_instance.tip_blockhash {
-                panic!("No reorg handling yet");
+                let tip = ChainTip {
+                    hash: db_instance.tip_blockhash,
+                    height: db_instance.tip_blockheight,
+                };
+                handle_reorg(db_path, config, bitcoind, &tip)?;
             }
 
             match new_block(db_path, secp, config, bitcoind, &bitcoind_tip) {
@@ -559,7 +605,11 @@ pub fn main_loop(
                 Err(e) => return Err(e),
             }
         } else if bitcoind_tip.hash != db_instance.tip_blockhash {
-            panic!("No reorg handling yet");
+            let tip = ChainTip {
+                hash: db_instance.tip_blockhash,
+                height: db_instance.tip_blockheight,
+            };
+            handle_reorg(db_path, config, bitcoind, &tip)?;
         }
 
         thread::sleep(config.bitcoind_config.poll_interval_secs);

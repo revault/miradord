@@ -51,28 +51,37 @@ if __name__ == "__main__":
     req = read_request()
     config = req["config"]
     assert "data_dir" in config and "max_value" in config
-    block_info = req["block_info"]
     maybe_create_data_dir(config)
     assert DATASTORE_FNAME in os.listdir(config["data_dir"])
 
-    # First update the recorded attempts with the new and pass attempts.
-    in_flight = recorded_attempts(config)
-    for op in block_info["successful_attempts"] + block_info["revaulted_attempts"]:
-        del in_flight[op]
-    for v in block_info["new_attempts"]:
-        in_flight[v["deposit_outpoint"]] = v["value"]
-    update_in_flight(config, in_flight)
+    resp = {}
+    if req["method"] == "new_block":
+        block_info = req["block_info"]
+        # First update the recorded attempts with the new and pass attempts.
+        in_flight = recorded_attempts(config)
+        for op in block_info["successful_attempts"] + block_info["revaulted_attempts"]:
+            del in_flight[op]
+        for v in block_info["new_attempts"]:
+            in_flight[v["deposit_outpoint"]] = v["value"]
+        update_in_flight(config, in_flight)
 
-    # Did we get above the threshold? Note we might stay a bit above the threshold
-    # for the time that the vaults we told the WT to revault previously actually get
-    # their Cancel transaction confirmed.
-    resp = {"revault": []}
-    value_in_flight = sum([in_flight[k] for k in in_flight])
-    while value_in_flight > config["max_value"] and len(block_info["new_attempts"]) > 0:
-        v = block_info["new_attempts"].pop(0)
-        resp["revault"].append(v["deposit_outpoint"])
-        value_in_flight -= v["value"]
-        continue
+        # Did we get above the threshold? Note we might stay a bit above the threshold
+        # for the time that the vaults we told the WT to revault previously actually get
+        # their Cancel transaction confirmed.
+        resp = {"revault": []}
+        value_in_flight = sum([in_flight[k] for k in in_flight])
+        while value_in_flight > config["max_value"] and len(block_info["new_attempts"]) > 0:
+            v = block_info["new_attempts"].pop(0)
+            resp["revault"].append(v["deposit_outpoint"])
+            value_in_flight -= v["value"]
+            continue
+    elif req["method"] == "invalidate_block":
+        # We don't really care
+        pass
+    else:
+        # TODO: maybe we should reply saying that we don't know what
+        # they're talking about?
+        pass
 
     sys.stdout.write(json.dumps(resp))
     sys.stdout.flush()

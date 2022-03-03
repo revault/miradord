@@ -15,7 +15,16 @@ def read_request():
 
 if __name__ == "__main__":
     req = read_request()
-    block_info = req["block_info"]
-    resp = {"revault": [v["deposit_outpoint"] for v in block_info["new_attempts"]]}
+    resp = {}
+    if req["method"] == "new_block":
+        block_info = req["block_info"]
+        resp = {"revault": [v["deposit_outpoint"] for v in block_info["new_attempts"]]}
+    elif req["method"] == "invalidate_block":
+        # We don't really care
+        pass
+    else:
+        # TODO: maybe we should reply saying that we don't know what
+        # they're talking about?
+        pass
     sys.stdout.write(json.dumps(resp))
     sys.stdout.flush()

@@ -413,6 +413,39 @@ impl BitcoinD {
         self.make_node_request_failible("sendrawtransaction", &params!(tx_hex))
             .map(|_| ())
     }
+
+    /// Get some stats (previousblockhash, confirmations, height) about this block
+    pub fn get_block_stats(&self, blockhash: BlockHash) -> Result<BlockStats, BitcoindError> {
+        let res = self.make_node_request(
+            "getblockheader",
+            &params!(Json::String(blockhash.to_string()),),
+        );
+        let confirmations = res
+            .get("confirmations")
+            .map(|a| a.as_i64())
+            .flatten()
+            .expect("Invalid confirmations in `getblockheader` response: not an i64")
+            as i32;
+        let previous_block_str = res
+            .get("previousblockhash")
+            .map(|a| a.as_str())
+            .flatten()
+            .expect("Invalid previousblockhash in `getblockheader` response: not a string");
+        let previous_blockhash = BlockHash::from_str(previous_block_str)
+            .expect("Invalid previousblockhash hex in `getblockheader` response");
+        let height = res
+            .get("height")
+            .map(|a| a.as_i64())
+            .flatten()
+            .expect("Invalid height in `getblockheader` response: not an u32")
+            as i32;
+        Ok(BlockStats {
+            confirmations,
+            previous_blockhash,
+            height,
+            blockhash,
+        })
+    }
 }
 
 /// Info about bitcoind's sync state
@@ -435,4 +468,12 @@ pub struct UtxoInfo {
     pub confirmations: i64,
     pub bestblock: BlockHash,
     pub value: Amount,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockStats {
+    pub confirmations: i32,
+    pub previous_blockhash: BlockHash,
+    pub blockhash: BlockHash,
+    pub height: i32,
 }
