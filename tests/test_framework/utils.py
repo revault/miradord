@@ -93,15 +93,14 @@ def get_descriptors(stks_xpubs, cosigs_keys, mans_xpubs, mans_thresh, cpfp_xpubs
             "mscompiler",
         )
     )
-    cwd = os.getcwd()
-    os.chdir(mscompiler_dir)
+    mscompiler_cargo_toml = os.path.join(mscompiler_dir, "Cargo.toml")
     try:
-        subprocess.check_call(["cargo", "build"])
+        subprocess.check_call(
+            ["cargo", "build", "--manifest-path", mscompiler_cargo_toml]
+        )
     except subprocess.CalledProcessError as e:
         logging.error(f"Error compiling mscompiler: {str(e)}")
         raise e
-    finally:
-        os.chdir(cwd)
 
     mscompiler_bin = os.path.join(mscompiler_dir, "target", "debug", "mscompiler")
     cmd = [
@@ -144,7 +143,6 @@ def get_signed_txs(
     Get the Unvault, Cancel, Emergency and Unvault Emergency fully signed
     transactions extracted, ready to be broadcast.
     """
-    # FIXME: use `cargo`'s '--manifest-path' option instead
     # tests/test_framework/../../contrib/tools/txbuilder/target/debug/txbuilder
     txbuilder_dir = os.path.abspath(
         os.path.join(
@@ -154,15 +152,14 @@ def get_signed_txs(
             "txbuilder",
         )
     )
-    cwd = os.getcwd()
-    os.chdir(txbuilder_dir)
+    txbuilder_cargo_toml = os.path.join(txbuilder_dir, "Cargo.toml")
     try:
-        subprocess.check_call(["cargo", "build"])
+        subprocess.check_call(
+            ["cargo", "build", "--manifest-path", txbuilder_cargo_toml]
+        )
     except subprocess.CalledProcessError as e:
         logging.error(f"Error compiling txbuilder: {str(e)}")
         raise e
-    finally:
-        os.chdir(cwd)
 
     txbuilder_bin = os.path.join(txbuilder_dir, "target", "debug", "txbuilder")
     cmd = [
