@@ -6,3 +6,7 @@ bip32~=2.0
 pynacl==1.4
 noiseprotocol==0.3.1
 toml==0.10.2
+
+# For the bitcoind proxy
+Flask==2.0.3
+cheroot==8.5.*

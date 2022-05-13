@@ -5,5 +5,6 @@ authors = ["Antoine Poinsot <darosior@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
-revault_tx = "0.4"
+revault_tx = { git = "https://github.com/revault/revault_tx", features = ["use-serde"] }
+revault_net = { git = "https://github.com/revault/revault_net" }
 serde_json = "1"

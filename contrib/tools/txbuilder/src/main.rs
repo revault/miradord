@@ -1,9 +1,10 @@
 use std::{collections::BTreeMap, env, process, str::FromStr};
 
+use revault_net::message::watchtower::CancelFeerate;
 use revault_tx::{
     bitcoin::{
         consensus::encode::serialize_hex, secp256k1, util::bip32, Address, Amount, OutPoint,
-        Script, SigHashType, TxOut,
+        Script, TxOut,
     },
     miniscript::{
         descriptor::{Descriptor, DescriptorTrait},
@@ -111,14 +112,13 @@ fn sanity_checks(
 
 fn sign<C: secp256k1::Signing + secp256k1::Verification>(
     psbt: &mut impl RevaultTransaction,
-    sigtype: SigHashType,
     privkeys: &[secp256k1::SecretKey],
     secp: &secp256k1::Secp256k1<C>,
 ) -> BTreeMap<String, String> {
     let mut sigs = BTreeMap::new();
 
     for privkey in privkeys.iter() {
-        let sighash = psbt.signature_hash(0, sigtype).unwrap();
+        let sighash = psbt.signature_hash(0).unwrap();
         let sighash = secp256k1::Message::from_slice(&sighash).unwrap();
         let pubkey = secp256k1::PublicKey::from_secret_key(&secp, &privkey);
         let sig = secp.sign(&sighash, &privkey);
@@ -176,7 +176,7 @@ fn main() {
     let derivation_index: u32 = from_json!(&args[10]);
     sanity_checks(&deposit_desc, &unvault_desc, &cpfp_desc);
 
-    let (mut unvault_tx, mut cancel_tx, mut emer_tx, mut unemer_tx) =
+    let (mut unvault_tx, cancel_batch, mut emer_tx, mut unemer_tx) =
         revault_tx::transactions::transaction_chain(
             deposit_outpoint,
             Amount::from_sat(deposit_value),
@@ -185,7 +185,6 @@ fn main() {
             &cpfp_desc,
             derivation_index.into(),
             emer_address,
-            0,
             &secp,
         )
         .unwrap_or_else(|e| {
@@ -204,7 +203,7 @@ fn main() {
         vec![spend_txo],
         None,
         &der_cpfp_desc,
-        0, // FIXME: remove from the API
+        0,
         true,
     )
     .unwrap_or_else(|e| {
@@ -222,30 +221,18 @@ fn main() {
                 .key
         })
         .collect();
-    let unvault_sigs = sign(
-        &mut unvault_tx,
-        SigHashType::All,
-        &stk_privkeys,
-        &secp,
-    );
-    let cancel_sigs = sign(
-        &mut cancel_tx,
-        SigHashType::AllPlusAnyoneCanPay,
-        &stk_privkeys,
-        &secp,
-    );
-    let emer_sigs = sign(
-        &mut emer_tx,
-        SigHashType::AllPlusAnyoneCanPay,
-        &stk_privkeys,
-        &secp,
-    );
-    let unemer_sigs = sign(
-        &mut unemer_tx,
-        SigHashType::AllPlusAnyoneCanPay,
-        &stk_privkeys,
-        &secp,
-    );
+    let unvault_sigs = sign(&mut unvault_tx, &stk_privkeys, &secp);
+    let mut cancel_sigs = BTreeMap::new();
+    let mut cancel_txs = BTreeMap::new();
+    for (feerate, mut cancel_tx) in cancel_batch.feerates_map() {
+        cancel_sigs.insert(
+            CancelFeerate(feerate),
+            sign(&mut cancel_tx, &stk_privkeys, &secp),
+        );
+        cancel_txs.insert(CancelFeerate(feerate), serialize_hex(&cancel_tx.into_tx()));
+    }
+    let emer_sigs = sign(&mut emer_tx, &stk_privkeys, &secp);
+    let unemer_sigs = sign(&mut unemer_tx, &stk_privkeys, &secp);
     let spend_privkeys: Vec<secp256k1::SecretKey> = man_xprivs
         .iter()
         .map(|xpriv| {
@@ -257,12 +244,7 @@ fn main() {
         })
         .chain(cosig_privkeys.into_iter())
         .collect();
-    sign(
-        &mut spend_tx,
-        SigHashType::All,
-        &spend_privkeys,
-        &secp,
-    );
+    sign(&mut spend_tx, &spend_privkeys, &secp);
 
     println!(
         "{:#}",
@@ -272,7 +254,7 @@ fn main() {
                 "sigs": unvault_sigs,
             }),
             "cancel": serde_json::json!({
-                "tx": serialize_hex(&cancel_tx.into_tx()),
+                "tx": cancel_txs,
                 "sigs": cancel_sigs,
             }),
             "emer": serde_json::json!({
