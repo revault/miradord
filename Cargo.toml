@@ -1,12 +1,12 @@
 [package]
 name = "miradord"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Antoine Poinsot <darosior@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
-revault_tx = { git = "https://github.com/revault/revault_tx", features = ["use-serde"] }
-revault_net = { git = "https://github.com/revault/revault_net" }
+revault_tx = { version = "0.5", features = ["use-serde"] }
+revault_net = "0.3"
 
 # Don't reinvent the wheel
 dirs = "3.0"
