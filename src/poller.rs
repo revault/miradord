@@ -21,7 +21,11 @@ use revault_tx::{
     txouts::DepositTxOut,
 };
 
+use revault_net::noise::SecretKey as NoisePrivkey;
+
 use std::{collections::HashMap, convert::TryInto, path, thread};
+
+use crate::coordinator;
 
 /// How many blocks are we waiting to consider a consumed vault irreversably spent
 const REORG_WATCH_LIMIT: i32 = 288;
@@ -357,6 +361,7 @@ fn check_for_unvault(
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
     db_updates: &mut DbUpdates,
+    coordinator_client: &coordinator::CoordinatorClient,
 ) -> Result<Vec<VaultInfo>, PollerError> {
     let deleg_vaults = db_blank_vaults(db_path)?;
     let mut new_attempts = vec![];
@@ -392,10 +397,21 @@ fn check_for_unvault(
             db_vault.unvault_height = Some(unvault_height);
             // If needed to be canceled it will be marked as such when plugins tell us so.
             db_updates.new_unvaulted.insert(db_vault.id, db_vault);
+
+            let candidate_tx =
+                match coordinator_client.get_spend_transaction(db_vault.deposit_outpoint.clone()) {
+                    Ok(res) => res,
+                    Err(_e) => {
+                        // Because we do not trust the coordinator, we consider it refuses to deliver the
+                        // spend tx if a communication error happened.
+                        None
+                    }
+                };
             let vault_info = VaultInfo {
                 value: db_vault.amount,
                 deposit_outpoint: db_vault.deposit_outpoint,
                 unvault_tx,
+                candidate_tx,
             };
             new_attempts.push(vault_info);
         }
@@ -483,6 +499,7 @@ fn new_block(
     config: &Config,
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
+    coordinator_client: &coordinator::CoordinatorClient,
 ) -> Result<(), PollerError> {
     // We want to update our state for a given height, therefore we need to stop the updating
     // process if we notice that the chain moved forward under us (or we could end up assuming
@@ -507,6 +524,7 @@ fn new_block(
         bitcoind,
         current_tip,
         &mut db_updates,
+        coordinator_client,
     )?;
 
     // Any Cancel tx still unconfirmed? Any vault to forget about?
@@ -564,7 +582,13 @@ pub fn main_loop(
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
     config: &Config,
     bitcoind: &BitcoinD,
+    noise_privkey: NoisePrivkey,
 ) -> Result<(), PollerError> {
+    let coordinator_client = coordinator::CoordinatorClient::new(
+        noise_privkey,
+        config.coordinator_host,
+        config.coordinator_noise_key,
+    );
     loop {
         let db_instance = db_instance(db_path)?;
         let bitcoind_tip = bitcoind.chain_tip();
@@ -575,7 +599,14 @@ pub fn main_loop(
                 panic!("No reorg handling yet");
             }
 
-            match new_block(db_path, secp, config, bitcoind, &bitcoind_tip) {
+            match new_block(
+                db_path,
+                secp,
+                config,
+                bitcoind,
+                &bitcoind_tip,
+                &coordinator_client,
+            ) {
                 Ok(()) => {}
                 // Retry immediately if the tip changed while we were updating ourselves
                 Err(PollerError::TipChanged) => continue,

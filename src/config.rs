@@ -150,7 +150,8 @@ pub struct Config {
     #[serde(deserialize_with = "deserialize_noisepubkey")]
     pub stakeholder_noise_key: NoisePubkey,
     /// The host of the sync server (may be an IP or a hidden service)
-    pub coordinator_host: String,
+    /// TODO: change for enum handling multiple choice.
+    pub coordinator_host: SocketAddr,
     /// The Noise static public key of the sync server
     #[serde(deserialize_with = "deserialize_noisepubkey")]
     pub coordinator_noise_key: NoisePubkey,

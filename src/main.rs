@@ -1,5 +1,6 @@
 mod bitcoind;
 mod config;
+mod coordinator;
 mod daemonize;
 mod database;
 mod keys;
@@ -235,6 +236,7 @@ fn main() {
         let _db_path = db_path.clone();
         let _config = config.clone();
         let _bitcoind = bitcoind.clone();
+        let noise_secret = noise_secret.clone();
         move || {
             listener_main(&_db_path, &_config, _bitcoind, &noise_secret).unwrap_or_else(|e| {
                 log::error!("Error in listener loop: '{}'", e);
@@ -246,7 +248,7 @@ fn main() {
     log::info!("Started miradord.",);
 
     let secp_ctx = secp256k1::Secp256k1::verification_only();
-    poller::main_loop(&db_path, &secp_ctx, &config, &bitcoind).unwrap_or_else(|e| {
+    poller::main_loop(&db_path, &secp_ctx, &config, &bitcoind, noise_secret).unwrap_or_else(|e| {
         log::error!("Error in main loop: '{}'", e);
         process::exit(1);
     });
