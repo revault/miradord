@@ -127,6 +127,17 @@ pub struct BitcoindConfig {
     pub poll_interval_secs: Duration,
 }
 
+/// Everything we need to know for talking to coordinator
+#[derive(Debug, Clone, Deserialize)]
+pub struct CoordinatorConfig {
+    /// The Noise static public key of the sync server
+    #[serde(deserialize_with = "deserialize_noisepubkey")]
+    pub noise_key: NoisePubkey,
+    /// The host of the sync server (may be an IP or a hidden service)
+    /// TODO: change for enum handling multiple choice.
+    pub host: SocketAddr,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScriptsConfig {
     #[serde(deserialize_with = "deserialize_fromstr")]
@@ -149,12 +160,8 @@ pub struct Config {
     /// The Noise static public keys of "our" stakeholder
     #[serde(deserialize_with = "deserialize_noisepubkey")]
     pub stakeholder_noise_key: NoisePubkey,
-    /// The host of the sync server (may be an IP or a hidden service)
-    /// TODO: change for enum handling multiple choice.
-    pub coordinator_host: SocketAddr,
-    /// The Noise static public key of the sync server
-    #[serde(deserialize_with = "deserialize_noisepubkey")]
-    pub coordinator_noise_key: NoisePubkey,
+    /// Everything we need to know to talk to coordinator
+    pub coordinator_config: Option<CoordinatorConfig>,
     /// An optional custom data directory
     // TODO: have a default implem as in cosignerd
     pub data_dir: Option<PathBuf>,
@@ -353,8 +360,9 @@ mod tests {
 
             stakeholder_noise_key = "3de4539519b6baca35ad14cd5bac9a4e0875a851632112405bb0547e6fcf16f6"
 
-            coordinator_host = "127.0.0.1:1"
-            coordinator_noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
+            [coordinator_config]
+            host = "127.0.0.1:1"
+            noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
 
             [scripts_config]
             cpfp_descriptor = "wsh(thresh(1,pk(xpub6BaZSKgpaVvibu2k78QsqeDWXp92xLHZxiu1WoqLB9hKhsBf3miBUDX7PJLgSPvkj66ThVHTqdnbXpeu8crXFmDUd4HeM4s4miQS2xsv3Qb/*)))#cwycq5xu"
@@ -385,8 +393,9 @@ mod tests {
 
             stakeholder_noise_key = "3de4539519b6baca35ad14cd5bac9a4e0875a851632112405bb0547e6fcf16f6"
 
-            coordinator_host = "127.0.0.1:1"
-            coordinator_noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
+            [coordinator_config]
+            host = "127.0.0.1:1"
+            noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
 
             [[plugins]]
             path = "src/config.rs"
@@ -417,8 +426,9 @@ mod tests {
 
             stakeholder_noise_key = "3de4539519b6baca35ad14cd5bac9a4e0875a851632112405bb0547e6fcf16f6"
 
-            coordinator_host = "127.0.0.1:1"
-            coordinator_noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
+            [coordinator_config]
+            host = "127.0.0.1:1"
+            noise_key = "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
 
             [scripts_config]
             cpfp_descriptor = "wsh(thresh(1,pk(xpub6BaZSKgpaVvibu2k78QsqeDWXp92xLHZxiu1WoqLB9hKhsBf3miBUDX7PJLgSPvkj66ThVHTqdnbXpeu8crXFmDUd4HeM4s4miQS2xsv3Qb/*)))#cwycq5xu"

@@ -361,7 +361,7 @@ fn check_for_unvault(
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
     db_updates: &mut DbUpdates,
-    coordinator_client: &coordinator::CoordinatorClient,
+    coordinator_client: Option<&coordinator::CoordinatorClient>,
 ) -> Result<Vec<VaultInfo>, PollerError> {
     let deleg_vaults = db_blank_vaults(db_path)?;
     let mut new_attempts = vec![];
@@ -398,15 +398,21 @@ fn check_for_unvault(
             // If needed to be canceled it will be marked as such when plugins tell us so.
             db_updates.new_unvaulted.insert(db_vault.id, db_vault);
 
-            let candidate_tx =
-                match coordinator_client.get_spend_transaction(db_vault.deposit_outpoint.clone()) {
+            let candidate_tx = if let Some(client) = coordinator_client {
+                match client.get_spend_transaction(db_vault.deposit_outpoint.clone()) {
                     Ok(res) => res,
                     Err(_e) => {
                         // Because we do not trust the coordinator, we consider it refuses to deliver the
                         // spend tx if a communication error happened.
                         None
                     }
-                };
+                }
+            } else {
+                // No coordinator configuration was found in the config
+                // therefore no spend transaction can be shared to plugins
+                None
+            };
+
             let vault_info = VaultInfo {
                 value: db_vault.amount,
                 deposit_outpoint: db_vault.deposit_outpoint,
@@ -499,7 +505,7 @@ fn new_block(
     config: &Config,
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
-    coordinator_client: &coordinator::CoordinatorClient,
+    coordinator_client: Option<&coordinator::CoordinatorClient>,
 ) -> Result<(), PollerError> {
     // We want to update our state for a given height, therefore we need to stop the updating
     // process if we notice that the chain moved forward under us (or we could end up assuming
@@ -584,11 +590,9 @@ pub fn main_loop(
     bitcoind: &BitcoinD,
     noise_privkey: NoisePrivkey,
 ) -> Result<(), PollerError> {
-    let coordinator_client = coordinator::CoordinatorClient::new(
-        noise_privkey,
-        config.coordinator_host,
-        config.coordinator_noise_key,
-    );
+    let coordinator_client = config.coordinator_config.as_ref().map(|config| {
+        coordinator::CoordinatorClient::new(noise_privkey, config.host, config.noise_key)
+    });
     loop {
         let db_instance = db_instance(db_path)?;
         let bitcoind_tip = bitcoind.chain_tip();
@@ -605,7 +609,7 @@ pub fn main_loop(
                 config,
                 bitcoind,
                 &bitcoind_tip,
-                &coordinator_client,
+                coordinator_client.as_ref(),
             ) {
                 Ok(()) => {}
                 // Retry immediately if the tip changed while we were updating ourselves
