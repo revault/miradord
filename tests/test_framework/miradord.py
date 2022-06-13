@@ -76,13 +76,12 @@ class Miradord(TailableProc):
             f.write("daemon = false\n")
             f.write(f"log_level = '{LOG_LEVEL}'\n")
 
+            f.write(f'listen = "127.0.0.1:{listen_port}"\n')
             f.write(f'stakeholder_noise_key = "{stk_noise_key.hex()}"\n')
 
-            f.write(f'coordinator_host = "127.0.0.1:{coordinator_port}"\n')
-            f.write(f'coordinator_noise_key = "{coordinator_noise_key}"\n')
-            f.write("coordinator_poll_seconds = 5\n")
-
-            f.write(f'listen = "127.0.0.1:{listen_port}"\n')
+            f.write("[coordinator_config]\n")
+            f.write(f'host = "127.0.0.1:{coordinator_port}"\n')
+            f.write(f'noise_key = "{coordinator_noise_key.hex()}"\n')
 
             f.write("[scripts_config]\n")
             f.write(f'deposit_descriptor = "{deposit_desc}"\n')

@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 
+from nacl.public import PrivateKey as Curve25519Private
 
 TIMEOUT = int(os.getenv("TIMEOUT", 60))
 EXECUTOR_WORKERS = int(os.getenv("EXECUTOR_WORKERS", 20))
@@ -61,6 +62,19 @@ COSIG_PUBKEYS = [
 ]
 DERIV_INDEX = 7651
 DEPOSIT_ADDRESS = "bcrt1qgprmrfkz5mucga0ec046v0sf8yg2y4za99c0h26ew5ycfx64sgdsl0u2j3"
+
+
+class NoiseKeypair:
+    """A pair of Curve25519 keys"""
+
+    def __init__(
+        self,
+        privkey,
+    ):
+        self.privkey = privkey
+        self.pubkey = bytes(
+            Curve25519Private(privkey).public_key
+        )
 
 
 def wait_for(success, timeout=TIMEOUT, debug_fn=None):
