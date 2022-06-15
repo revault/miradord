@@ -18,7 +18,7 @@ use revault_tx::{
         CancelTransaction, RevaultPresignedTransaction, RevaultTransaction, UnvaultTransaction,
     },
     txins::{DepositTxIn, RevaultTxIn, UnvaultTxIn},
-    txouts::DepositTxOut,
+    txouts::{DepositTxOut, RevaultTxOut},
 };
 
 use revault_net::noise::SecretKey as NoisePrivkey;
@@ -400,7 +400,38 @@ fn check_for_unvault(
 
             let candidate_tx = if let Some(client) = coordinator_client {
                 match client.get_spend_transaction(db_vault.deposit_outpoint.clone()) {
-                    Ok(res) => res,
+                    Ok(Some(tx)) => {
+                        let spent_unvault_outpoint = unvault_txin.outpoint();
+                        if let Some(i) = tx
+                            .input
+                            .iter()
+                            .position(|input| input.previous_output == spent_unvault_outpoint)
+                        {
+                            let txout = unvault_txin.txout().txout();
+                            if let Err(e) = bitcoinconsensus::verify(
+                                &txout.script_pubkey.as_bytes(),
+                                txout.value,
+                                &encode::serialize(&tx),
+                                i,
+                            ) {
+                                log::error!(
+                                    "Coordinator sent a suspicious tx {}, libbitcoinconsensus error: {:?}",
+                                    tx.txid(),
+                                    e
+                                );
+                                None
+                            } else {
+                                Some(tx)
+                            }
+                        } else {
+                            log::error!(
+                                "Coordinator sent a suspicious tx {}, the transaction does not spend the vault",
+                                tx.txid(),
+                            );
+                            None
+                        }
+                    }
+                    Ok(None) => None,
                     Err(_e) => {
                         // Because we do not trust the coordinator, we consider it refuses to deliver the
                         // spend tx if a communication error happened.

@@ -63,7 +63,9 @@ impl CoordinatorClient {
         transport.send_req(&req)
     }
 
-    // Get Spend transaction spending the vault with the given deposit outpoint.
+    /// Get Spend transaction spending the vault with the given deposit outpoint.
+    /// Beware that the spend transaction may be invalid and needs to be verified against
+    /// libbitcoinconsensus.
     pub fn get_spend_transaction(
         &self,
         deposit_outpoint: OutPoint,
