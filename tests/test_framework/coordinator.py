@@ -1,6 +1,7 @@
 import cryptography
 import json
 import os
+import random
 import select
 import socket
 import threading
@@ -149,6 +150,26 @@ class DummyCoordinator:
             f"Unknown client key. Keys: {','.join(k.hex() for k in self.client_pubkeys)}"
         )
 
+    def client_noise_conn(self, client_noisepriv):
+        """Create a new connection to the coordinator, performing the Noise handshake."""
+        conn = NoiseConnection.from_name(b"Noise_KK_25519_ChaChaPoly_SHA256")
+
+        conn.set_as_initiator()
+        conn.set_keypair_from_private_bytes(Keypair.STATIC, client_noisepriv)
+        conn.set_keypair_from_private_bytes(Keypair.REMOTE_STATIC, self.coordinator_privkey)
+        conn.start_handshake()
+
+        sock = socket.socket()
+        sock.settimeout(TIMEOUT // 10)
+        sock.connect(("localhost", self.port))
+        msg = conn.write_message(b"practical_revault_0")
+        sock.sendall(msg)
+        resp = sock.recv(32 + 16)  # Key size + Mac size
+        assert len(resp) > 0
+        conn.read_message(resp)
+
+        return sock, conn
+
     def read_msg(self, fd, noise_conn):
         """read a noise-encrypted message from this stream.
 
@@ -190,3 +211,39 @@ class DummyCoordinator:
             if d == b"":
                 return data
             data += d
+
+    def set_spend_tx(
+        self,
+        manager_privkey,
+        deposit_outpoints,
+        spend_tx,
+    ):
+        """
+        Send a `set_spend_tx` message to the coordinator
+        """
+        (sock, conn) = self.client_noise_conn(manager_privkey)
+        msg_id = random.randint(0, 2 ** 32)
+        msg = {
+            "id": msg_id,
+            "method": "set_spend_tx",
+            "params": {
+                "deposit_outpoints": deposit_outpoints,
+                "spend_tx": spend_tx,
+            }
+        }
+
+        msg_serialized = json.dumps(msg)
+        self.send_msg(sock, conn, msg_serialized)
+
+        # Same for decryption, careful to read length first and then the body
+        resp_header = sock.recv(2 + 16)
+        assert len(resp_header) > 0
+        resp_header = conn.decrypt(resp_header)
+        resp_len = int.from_bytes(resp_header, "big")
+        resp = sock.recv(resp_len)
+        assert len(resp) == resp_len
+        resp = conn.decrypt(resp)
+
+        resp = json.loads(resp)
+        assert resp["id"] == msg_id, "Reusing the same Noise connection across threads?"
+        assert resp["result"]["ack"]
