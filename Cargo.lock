@@ -389,8 +389,7 @@ dependencies = [
 [[package]]
 name = "revault_net"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21cf3a2aec4c7afc9900d88eed6ef84272fcd78f2f36c69a46146cdb233d57f6"
+source = "git+https://github.com/edouardparis/revault_net?branch=Add-timeout-to-transport-send_req#1549523a18c8286ce38983a9fd90d10a35216add"
 dependencies = [
  "bitcoin",
  "log",
