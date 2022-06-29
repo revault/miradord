@@ -12,13 +12,13 @@ use crate::{
     plugins::{NewBlockInfo, VaultInfo},
 };
 use revault_tx::{
-    bitcoin::{consensus::encode, secp256k1, Amount, OutPoint},
+    bitcoin::{consensus::encode, secp256k1, Amount, OutPoint, Transaction},
     scripts::{DerivedCpfpDescriptor, DerivedDepositDescriptor, DerivedUnvaultDescriptor},
     transactions::{
         CancelTransaction, RevaultPresignedTransaction, RevaultTransaction, UnvaultTransaction,
     },
     txins::{DepositTxIn, RevaultTxIn, UnvaultTxIn},
-    txouts::{DepositTxOut, RevaultTxOut},
+    txouts::{DepositTxOut, RevaultTxOut, UnvaultTxOut},
 };
 
 use revault_net::noise::SecretKey as NoisePrivkey;
@@ -365,6 +365,8 @@ fn check_for_unvault(
 ) -> Result<Vec<VaultInfo>, PollerError> {
     let deleg_vaults = db_blank_vaults(db_path)?;
     let mut new_attempts = vec![];
+    // Map of the spend transactions with their input previous_output outpoints as keys.
+    let mut spend_cache = HashMap::<OutPoint, Transaction>::new();
 
     for mut db_vault in deleg_vaults {
         let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &db_vault);
@@ -398,44 +400,48 @@ fn check_for_unvault(
             // If needed to be canceled it will be marked as such when plugins tell us so.
             db_updates.new_unvaulted.insert(db_vault.id, db_vault);
 
+            let unvault_txin_outpoint = unvault_txin.outpoint();
             let candidate_tx = if let Some(client) = coordinator_client {
-                match client.get_spend_transaction(db_vault.deposit_outpoint.clone()) {
-                    Ok(Some(tx)) => {
-                        let spent_unvault_outpoint = unvault_txin.outpoint();
-                        if let Some(i) = tx
-                            .input
-                            .iter()
-                            .position(|input| input.previous_output == spent_unvault_outpoint)
-                        {
-                            let txout = unvault_txin.txout().txout();
-                            if let Err(e) = bitcoinconsensus::verify(
-                                &txout.script_pubkey.as_bytes(),
-                                txout.value,
-                                &encode::serialize(&tx),
-                                i,
-                            ) {
-                                log::error!(
+                if let Some(tx) = spend_cache.get(&unvault_txin_outpoint) {
+                    Some(tx.clone())
+                } else {
+                    match client.get_spend_transaction(db_vault.deposit_outpoint) {
+                        Ok(Some(tx)) => {
+                            if let Some(i) = tx
+                                .input
+                                .iter()
+                                .position(|input| input.previous_output == unvault_txin_outpoint)
+                            {
+                                let txout = unvault_txin.txout().txout();
+                                if let Err(e) = bitcoinconsensus::verify(
+                                    &txout.script_pubkey.as_bytes(),
+                                    txout.value,
+                                    &encode::serialize(&tx),
+                                    i,
+                                ) {
+                                    log::error!(
                                     "Coordinator sent a suspicious tx {}, libbitcoinconsensus error: {:?}",
                                     tx.txid(),
                                     e
                                 );
-                                None
+                                    None
+                                } else {
+                                    Some(tx)
+                                }
                             } else {
-                                Some(tx)
-                            }
-                        } else {
-                            log::error!(
+                                log::error!(
                                 "Coordinator sent a suspicious tx {}, the transaction does not spend the vault",
                                 tx.txid(),
                             );
+                                None
+                            }
+                        }
+                        Ok(None) => None,
+                        Err(_e) => {
+                            // Because we do not trust the coordinator, we consider it refuses to deliver the
+                            // spend tx if a communication error happened.
                             None
                         }
-                    }
-                    Ok(None) => None,
-                    Err(_e) => {
-                        // Because we do not trust the coordinator, we consider it refuses to deliver the
-                        // spend tx if a communication error happened.
-                        None
                     }
                 }
             } else {
@@ -443,6 +449,15 @@ fn check_for_unvault(
                 // therefore no spend transaction can be shared to plugins
                 None
             };
+
+            // Populate the spend cache
+            if spend_cache.get(&unvault_txin_outpoint).is_none() {
+                if let Some(tx) = candidate_tx.as_ref() {
+                    for input in &tx.input {
+                        spend_cache.insert(input.previous_output, tx.clone());
+                    }
+                }
+            }
 
             let vault_info = VaultInfo {
                 value: db_vault.amount,
