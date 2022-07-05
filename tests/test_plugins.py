@@ -4,7 +4,7 @@ import tempfile
 from base64 import b64encode
 
 from fixtures import *
-from test_framework.utils import COIN, DEPOSIT_ADDRESS, DERIV_INDEX, CSV
+from test_framework.utils import COIN, DEPOSIT_ADDRESS, DERIV_INDEX, CSV, compile_rust_binary
 
 
 def test_max_value_in_flight(miradord, bitcoind):
@@ -193,6 +193,111 @@ def test_revault_attempts_without_spend_tx(miradord, bitcoind, coordinator, nois
     # Generate two days worth of blocks, the WT should forget about this vault
     bitcoind.generate_block(288)
     miradord.wait_for_log(f"Forgetting about consumed vault at '{deposit_outpoint}'")
+
+
+def test_whitelist(miradord, bitcoind, coordinator, noise_keys):
+    """
+    Sanity check that we are only going to revault attempts that have no candidate
+    spend transaction.
+    """
+
+    whitelist_file_path = os.path.join(
+        os.path.dirname(__file__), "plugins", "whitelist.txt"
+    )
+    whitelist_file = open(whitelist_file_path, "w")
+    whitelist_file.close()
+
+    whitelist_directory = os.path.join(os.path.dirname(__file__), "plugins", "whitelist")
+    compile_rust_binary(whitelist_directory)
+
+    plugin_path = os.path.join(whitelist_directory, "target", "debug", "whitelist")
+    miradord.add_plugins(
+        [{"path": plugin_path, "config": {"whitelist_file_path": whitelist_file_path}}]
+    )
+
+    vaults_txs = []
+    vaults_outpoints = []
+    deposit_value = 4
+    for i in range(2):
+        deposit_txid, deposit_outpoint = bitcoind.create_utxo(
+            DEPOSIT_ADDRESS,
+            deposit_value,
+        )
+        bitcoind.generate_block(1, deposit_txid)
+        txs = miradord.watch_vault(
+            deposit_outpoint, deposit_value * COIN, DERIV_INDEX
+        )
+        vaults_outpoints.append(deposit_outpoint)
+        vaults_txs.append(txs)
+
+        # We share the spend txs to the coordinators
+    spend_tx = b64encode(bytes.fromhex(vaults_txs[0]["spend"]["tx"])).decode()
+    coordinator.set_spend_tx(
+        noise_keys["manager"].privkey, [vaults_outpoints[0]], spend_tx
+    )
+    spend_tx = b64encode(bytes.fromhex(vaults_txs[1]["spend"]["tx"])).decode()
+    coordinator.set_spend_tx(
+        noise_keys["manager"].privkey, [vaults_outpoints[1]], spend_tx
+    )
+
+    # Unvault the second vault
+    bitcoind.rpc.sendrawtransaction(vaults_txs[1]["unvault"]["tx"])
+    unvault_txid = bitcoind.rpc.decoderawtransaction(vaults_txs[1]["unvault"]["tx"])[
+        "txid"
+    ]
+    bitcoind.generate_block(1, unvault_txid)
+    miradord.wait_for_logs(
+        [
+            f"Got a confirmed Unvault UTXO for vault at '{vaults_outpoints[1]}'",
+            f"Broadcasted Cancel transaction '{vaults_txs[1]['cancel']['tx']['20']}'",
+        ]
+    )
+
+    # The Cancel transactions has been broadcast for vault #1 because the spend
+    # was sending funds to an address not present in the whitelist file.
+    cancel_txid = bitcoind.rpc.decoderawtransaction(
+        vaults_txs[1]["cancel"]["tx"]["20"]
+    )["txid"]
+    bitcoind.generate_block(1, wait_for_mempool=cancel_txid)
+    miradord.wait_for_log(
+        f"Cancel transaction was confirmed for vault at '{vaults_outpoints[1]}'"
+    )
+
+    # We append the address of the first spend tx to the whitelist
+    whitelist_file = open(whitelist_file_path, "w")
+    spend_tx = bitcoind.rpc.decoderawtransaction(vaults_txs[0]["spend"]["tx"])
+    for output in spend_tx["vout"]:
+        whitelist_file.write(output["scriptPubKey"]["address"])
+        whitelist_file.write("\n")
+    whitelist_file.close()
+
+    # Unvault the first vault
+    bitcoind.rpc.sendrawtransaction(vaults_txs[0]["unvault"]["tx"])
+    unvault_txid = bitcoind.rpc.decoderawtransaction(vaults_txs[0]["unvault"]["tx"])[
+        "txid"
+    ]
+    bitcoind.generate_block(1, unvault_txid)
+    miradord.wait_for_logs(
+        [
+            f"Got a confirmed Unvault UTXO for vault at '{vaults_outpoints[0]}'",
+            "Done processing block",
+        ]
+    )
+
+    # Now mine the spend tx for vault #0
+    bitcoind.generate_block(CSV)
+    bitcoind.rpc.sendrawtransaction(vaults_txs[0]["spend"]["tx"])
+    spend_txid = bitcoind.rpc.decoderawtransaction(vaults_txs[0]["spend"]["tx"])["txid"]
+    bitcoind.generate_block(1, wait_for_mempool=spend_txid)
+    miradord.wait_for_log(
+        f"Noticed .* that Spend transaction was confirmed for vault at '{vaults_outpoints[0]}'"
+    )
+    # Generate two days worth of blocks, the WT should forget about this vault
+    bitcoind.generate_block(288)
+    miradord.wait_for_log(f"Forgetting about consumed vault at '{deposit_outpoint}'")
+
+    # clean the whitelist file
+    os.remove(whitelist_file_path)
 
 
 def test_multiple_plugins(miradord, bitcoind):

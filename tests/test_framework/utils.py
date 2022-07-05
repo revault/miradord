@@ -140,6 +140,17 @@ def get_descriptors(stks_xpubs, cosigs_keys, mans_xpubs, mans_thresh, cpfp_xpubs
     )
 
 
+def compile_rust_binary(directory_path):
+    cargo_toml = os.path.join(directory_path, "Cargo.toml")
+    try:
+        subprocess.check_call(
+            ["cargo", "build", "--manifest-path", cargo_toml]
+        )
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error compiling {str(directory_path)}: {str(e)}")
+        raise e
+
+
 # FIXME: have a python-revault-tx lib to avoid this hack..
 def get_signed_txs(
     stks_xprivs,
@@ -166,14 +177,7 @@ def get_signed_txs(
             "txbuilder",
         )
     )
-    txbuilder_cargo_toml = os.path.join(txbuilder_dir, "Cargo.toml")
-    try:
-        subprocess.check_call(
-            ["cargo", "build", "--manifest-path", txbuilder_cargo_toml]
-        )
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Error compiling txbuilder: {str(e)}")
-        raise e
+    compile_rust_binary(txbuilder_dir)
 
     txbuilder_bin = os.path.join(txbuilder_dir, "target", "debug", "txbuilder")
     cmd = [
