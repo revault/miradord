@@ -1,6 +1,7 @@
 from concurrent import futures
 from ephemeral_port_reserve import reserve
 from test_framework.bitcoind import Bitcoind, BitcoindRpcProxy
+from test_framework.coordinator import DummyCoordinator
 from test_framework.miradord import Miradord
 from test_framework.utils import (
     get_descriptors,
@@ -9,6 +10,7 @@ from test_framework.utils import (
     MANS_XPUBS,
     COSIG_PUBKEYS,
     CSV,
+    NoiseKeypair,
 )
 
 import os
@@ -114,7 +116,40 @@ def bitcoind(directory):
 
 
 @pytest.fixture
-def miradord(request, bitcoind, directory):
+def noise_keys():
+    # The Noise keys are interdependant, so generate everything in advance
+    # to avoid roundtrips
+    coordinator_keys = NoiseKeypair(os.urandom(32))
+    manager_keys = NoiseKeypair(os.urandom(32))
+    stakeholder_keys = NoiseKeypair(os.urandom(32))
+    watchtower_keys = NoiseKeypair(os.urandom(32))
+    noise_keys = {
+        "coordinator": coordinator_keys,
+        "manager": manager_keys,
+        "stakeholder": stakeholder_keys,
+        "watchtower": watchtower_keys,
+    }
+    yield noise_keys
+
+
+@pytest.fixture
+def coordinator(noise_keys):
+    coordinator_port = reserve()
+    coordinator = DummyCoordinator(
+        coordinator_port,
+        noise_keys["coordinator"].privkey,
+        [
+            noise_keys["manager"].pubkey,
+            noise_keys["stakeholder"].pubkey,
+            noise_keys["watchtower"].pubkey
+        ],
+    )
+    coordinator.start()
+    yield coordinator
+
+
+@pytest.fixture
+def miradord(request, bitcoind, coordinator, noise_keys, directory):
     """If a 'mock_bitcoind' pytest marker is set, it will create a proxy for the communication
     from the miradord process to the bitcoind process. An optional 'mocks' parameter can be set
     for this marker in order to specify some pre-registered mock of RPC commands.
@@ -129,10 +164,6 @@ def miradord(request, bitcoind, directory):
         STKS_XPUBS, COSIG_PUBKEYS, MANS_XPUBS, len(MANS_XPUBS), cpfp_xpubs, CSV
     )
     emer_addr = "bcrt1qewc2348370pgw8kjz8gy09z8xyh0d9fxde6nzamd3txc9gkmjqmq8m4cdq"
-
-    coordinator_noise_key = (
-        "d91563973102454a7830137e92d0548bc83b4ea2799f1df04622ca1307381402"
-    )
 
     bitcoind_cookie = os.path.join(bitcoind.bitcoin_dir, "regtest", ".cookie")
     bitcoind_rpcport = bitcoind.rpcport
@@ -151,10 +182,10 @@ def miradord(request, bitcoind, directory):
         cpfp_desc,
         emer_addr,
         reserve(),
-        os.urandom(32),
-        os.urandom(32),
-        coordinator_noise_key,  # Unused yet
-        reserve(),  # Unused yet
+        noise_keys["watchtower"].privkey,
+        noise_keys["stakeholder"].privkey,
+        coordinator.coordinator_pubkey,
+        coordinator.port,
         bitcoind_rpcport,
         bitcoind_cookie,
     )

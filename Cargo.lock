@@ -307,6 +307,7 @@ name = "miradord"
 version = "0.0.2"
 dependencies = [
  "backtrace",
+ "bitcoinconsensus",
  "dirs",
  "fastrand",
  "fern",

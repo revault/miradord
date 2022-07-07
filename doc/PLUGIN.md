@@ -32,11 +32,12 @@ An overview of the spending attempts at the current block.
 
 ##### Vault resource 
 
-| Field              | Type    | Description                                  |
-| ------------------ | ------- | -------------------------------------------- |
-| `value`            | integer | Value of the vault in satoshis               |
-| `deposit_outpoint` | string  | Deposit outpoint of the vault                |
-| `unvault_tx`       | string  | Psbt of the unvault transaction of the vault |
+| Field              | Type           | Description                                                                                             |
+| ------------------ | -------------- | --------------------------------------------                                                            |
+| `value`            | integer        | Value of the vault in satoshis                                                                          |
+| `deposit_outpoint` | string         | Deposit outpoint of the vault                                                                           |
+| `unvault_tx`       | string         | Psbt of the unvault transaction of the vault                                                            |
+| `candidate_tx`     | string or null | Hex encoded transaction spending the vault, null if the watchtower did not retrieve it from coordinator |
 
 #### Plugin Response
 

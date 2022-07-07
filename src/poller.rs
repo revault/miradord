@@ -12,16 +12,20 @@ use crate::{
     plugins::{NewBlockInfo, VaultInfo},
 };
 use revault_tx::{
-    bitcoin::{consensus::encode, secp256k1, Amount, OutPoint},
+    bitcoin::{consensus::encode, secp256k1, Amount, OutPoint, Transaction},
     scripts::{DerivedCpfpDescriptor, DerivedDepositDescriptor, DerivedUnvaultDescriptor},
     transactions::{
         CancelTransaction, RevaultPresignedTransaction, RevaultTransaction, UnvaultTransaction,
     },
     txins::{DepositTxIn, RevaultTxIn, UnvaultTxIn},
-    txouts::DepositTxOut,
+    txouts::{DepositTxOut, RevaultTxOut, UnvaultTxOut},
 };
 
+use revault_net::noise::SecretKey as NoisePrivkey;
+
 use std::{collections::HashMap, convert::TryInto, path, thread};
+
+use crate::coordinator;
 
 /// How many blocks are we waiting to consider a consumed vault irreversably spent
 const REORG_WATCH_LIMIT: i32 = 288;
@@ -357,9 +361,12 @@ fn check_for_unvault(
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
     db_updates: &mut DbUpdates,
+    coordinator_client: Option<&coordinator::CoordinatorClient>,
 ) -> Result<Vec<VaultInfo>, PollerError> {
     let deleg_vaults = db_blank_vaults(db_path)?;
     let mut new_attempts = vec![];
+    // Map of the spend transactions with their input previous_output outpoints as keys.
+    let mut spend_cache = HashMap::<OutPoint, Transaction>::new();
 
     for mut db_vault in deleg_vaults {
         let (deposit_desc, unvault_desc, cpfp_desc) = descriptors(secp, config, &db_vault);
@@ -392,10 +399,71 @@ fn check_for_unvault(
             db_vault.unvault_height = Some(unvault_height);
             // If needed to be canceled it will be marked as such when plugins tell us so.
             db_updates.new_unvaulted.insert(db_vault.id, db_vault);
+
+            let unvault_txin_outpoint = unvault_txin.outpoint();
+            let candidate_tx = if let Some(client) = coordinator_client {
+                if let Some(tx) = spend_cache.get(&unvault_txin_outpoint) {
+                    Some(tx.clone())
+                } else {
+                    match client.get_spend_transaction(db_vault.deposit_outpoint) {
+                        Ok(Some(tx)) => {
+                            if let Some(i) = tx
+                                .input
+                                .iter()
+                                .position(|input| input.previous_output == unvault_txin_outpoint)
+                            {
+                                let txout = unvault_txin.txout().txout();
+                                if let Err(e) = bitcoinconsensus::verify(
+                                    &txout.script_pubkey.as_bytes(),
+                                    txout.value,
+                                    &encode::serialize(&tx),
+                                    i,
+                                ) {
+                                    log::error!(
+                                    "Coordinator sent a suspicious tx {}, libbitcoinconsensus error: {:?}",
+                                    tx.txid(),
+                                    e
+                                );
+                                    None
+                                } else {
+                                    Some(tx)
+                                }
+                            } else {
+                                log::error!(
+                                "Coordinator sent a suspicious tx {}, the transaction does not spend the vault",
+                                tx.txid(),
+                            );
+                                None
+                            }
+                        }
+                        Ok(None) => None,
+                        Err(_e) => {
+                            // Because we do not trust the coordinator, we consider it refuses to deliver the
+                            // spend tx if a communication error happened.
+                            None
+                        }
+                    }
+                }
+            } else {
+                // No coordinator configuration was found in the config
+                // therefore no spend transaction can be shared to plugins
+                None
+            };
+
+            // Populate the spend cache
+            if spend_cache.get(&unvault_txin_outpoint).is_none() {
+                if let Some(tx) = candidate_tx.as_ref() {
+                    for input in &tx.input {
+                        spend_cache.insert(input.previous_output, tx.clone());
+                    }
+                }
+            }
+
             let vault_info = VaultInfo {
                 value: db_vault.amount,
                 deposit_outpoint: db_vault.deposit_outpoint,
                 unvault_tx,
+                candidate_tx,
             };
             new_attempts.push(vault_info);
         }
@@ -483,6 +551,7 @@ fn new_block(
     config: &Config,
     bitcoind: &BitcoinD,
     current_tip: &ChainTip,
+    coordinator_client: Option<&coordinator::CoordinatorClient>,
 ) -> Result<(), PollerError> {
     // We want to update our state for a given height, therefore we need to stop the updating
     // process if we notice that the chain moved forward under us (or we could end up assuming
@@ -507,6 +576,7 @@ fn new_block(
         bitcoind,
         current_tip,
         &mut db_updates,
+        coordinator_client,
     )?;
 
     // Any Cancel tx still unconfirmed? Any vault to forget about?
@@ -564,7 +634,11 @@ pub fn main_loop(
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
     config: &Config,
     bitcoind: &BitcoinD,
+    noise_privkey: NoisePrivkey,
 ) -> Result<(), PollerError> {
+    let coordinator_client = config.coordinator_config.as_ref().map(|config| {
+        coordinator::CoordinatorClient::new(noise_privkey, config.host, config.noise_key)
+    });
     loop {
         let db_instance = db_instance(db_path)?;
         let bitcoind_tip = bitcoind.chain_tip();
@@ -575,7 +649,14 @@ pub fn main_loop(
                 panic!("No reorg handling yet");
             }
 
-            match new_block(db_path, secp, config, bitcoind, &bitcoind_tip) {
+            match new_block(
+                db_path,
+                secp,
+                config,
+                bitcoind,
+                &bitcoind_tip,
+                coordinator_client.as_ref(),
+            ) {
                 Ok(()) => {}
                 // Retry immediately if the tip changed while we were updating ourselves
                 Err(PollerError::TipChanged) => continue,

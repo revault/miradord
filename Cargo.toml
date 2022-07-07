@@ -5,6 +5,7 @@ authors = ["Antoine Poinsot <darosior@protonmail.com>"]
 edition = "2018"
 
 [dependencies]
+bitcoinconsensus = "0.19.0-2"
 revault_tx = { version = "0.5", features = ["use-serde"] }
 revault_net = "0.3"
 

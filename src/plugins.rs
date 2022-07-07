@@ -1,5 +1,5 @@
 use revault_tx::{
-    bitcoin::{Amount, OutPoint},
+    bitcoin::{consensus::encode, Amount, OutPoint, Transaction},
     transactions::UnvaultTransaction,
 };
 
@@ -63,6 +63,12 @@ fn serialize_amount<S: Serializer>(amount: &Amount, serializer: S) -> Result<S::
     amount.as_sat().serialize(serializer)
 }
 
+fn serialize_tx<S: Serializer>(tx: &Option<Transaction>, serializer: S) -> Result<S::Ok, S::Error> {
+    tx.as_ref()
+        .map(|tx| encode::serialize_hex(tx))
+        .serialize(serializer)
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Plugin {
     path: path::PathBuf,
@@ -76,7 +82,8 @@ pub struct VaultInfo {
     pub value: Amount,
     pub deposit_outpoint: OutPoint,
     pub unvault_tx: UnvaultTransaction,
-    // TODO: Spend tx
+    #[serde(serialize_with = "serialize_tx")]
+    pub candidate_tx: Option<Transaction>,
 }
 
 /// Information we are passing to a plugin after a new block if there was any update.
@@ -204,6 +211,7 @@ mod tests {
                 value: Amount::from_sat(567890),
                 deposit_outpoint,
                 unvault_tx: unvault_tx.clone(),
+                candidate_tx: None,
             })
             .collect();
         let many_outpoints: Vec<OutPoint> = (0..10000).map(|_| deposit_outpoint).collect();
@@ -239,6 +247,7 @@ mod tests {
             )
             .unwrap(),
             unvault_tx: unvault_tx.clone(),
+            candidate_tx: None,
         };
         let new_block = NewBlockInfo {
             new_attempts: vec![vault_info],
@@ -263,6 +272,7 @@ mod tests {
             value: Amount::from_sat(567890),
             deposit_outpoint,
             unvault_tx: unvault_tx.clone(),
+            candidate_tx: None,
         };
         let new_block = NewBlockInfo {
             new_attempts: vec![vault_info],

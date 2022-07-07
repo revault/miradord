@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 
+from nacl.public import PrivateKey as Curve25519Private
 
 TIMEOUT = int(os.getenv("TIMEOUT", 60))
 EXECUTOR_WORKERS = int(os.getenv("EXECUTOR_WORKERS", 20))
@@ -61,6 +62,19 @@ COSIG_PUBKEYS = [
 ]
 DERIV_INDEX = 7651
 DEPOSIT_ADDRESS = "bcrt1qgprmrfkz5mucga0ec046v0sf8yg2y4za99c0h26ew5ycfx64sgdsl0u2j3"
+
+
+class NoiseKeypair:
+    """A pair of Curve25519 keys"""
+
+    def __init__(
+        self,
+        privkey,
+    ):
+        self.privkey = privkey
+        self.pubkey = bytes(
+            Curve25519Private(privkey).public_key
+        )
 
 
 def wait_for(success, timeout=TIMEOUT, debug_fn=None):
@@ -126,6 +140,17 @@ def get_descriptors(stks_xpubs, cosigs_keys, mans_xpubs, mans_thresh, cpfp_xpubs
     )
 
 
+def compile_rust_binary(directory_path):
+    cargo_toml = os.path.join(directory_path, "Cargo.toml")
+    try:
+        subprocess.check_call(
+            ["cargo", "build", "--manifest-path", cargo_toml]
+        )
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error compiling {str(directory_path)}: {str(e)}")
+        raise e
+
+
 # FIXME: have a python-revault-tx lib to avoid this hack..
 def get_signed_txs(
     stks_xprivs,
@@ -152,14 +177,7 @@ def get_signed_txs(
             "txbuilder",
         )
     )
-    txbuilder_cargo_toml = os.path.join(txbuilder_dir, "Cargo.toml")
-    try:
-        subprocess.check_call(
-            ["cargo", "build", "--manifest-path", txbuilder_cargo_toml]
-        )
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Error compiling txbuilder: {str(e)}")
-        raise e
+    compile_rust_binary(txbuilder_dir)
 
     txbuilder_bin = os.path.join(txbuilder_dir, "target", "debug", "txbuilder")
     cmd = [
